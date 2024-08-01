@@ -38,66 +38,34 @@ impl OpList {
 		] }; // Start with the first element in the list with the length to be zero
 
 
+        // let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
+        // let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
 		for op in self.ops.iter() {
 			// Current Iins
-			let mut ins = op.ins;
-			let mut len = op.len;
-			
-			let mut new_range_element_index: isize = -1; 
-			let mut delete_range_element_index: isize = -1; 
-			let mut negative_range_element_index: isize = -1; 
-			let mut range_len_after_addition: i32 = -1; 
-			let mut range_ins_after_addition: i32 = -1; 
+			let mut op_ins = op.ins;
+			let mut op_len = op.len;
+
+			let mut aggerate_len: i32 = 0;
+
+			let mut range_insertion_index: usize = usize::MAX;
+			let mut range_insertion_OI: usize = usize::MAX;
+			let mut range_insertion_len: usize = usize::MAX;
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
-				if (ins >= range.ins) && ((ins as i32) <= (range.ins as i32 +range.len)) && (range.len + len == 0) { // <- Comparing negative range to positive range and negative range removes the whole positive range.
-					delete_range_element_index = i as isize;
-					new_range_element_index = -1;
-					break;
-				} else if (ins >= range.ins) && ((ins as i32) <= (range.ins as i32 +range.len)) && (range.len + len < 0) { // <- If the element would be negative, therefore has to be handled differently.
-					// negative_range_element_index = i as isize;
-					// range.ins = ins;
+				let mut range_ins = range.ins + aggerate_len;
+				let mut range_len = range.len;
 
-					// This is not being invoked for 2 negative range, but is invoked for 1 negative range and 1 positive range.
-
-					range.len += len;
-					new_range_element_index = -1;
+				if op_ins >= range_ins && op_ins <= range_ins + range_len {
+					range.len += op_len;
 					break;
-				} else if range.len < 0 && len < 0 && (ins <= range.ins) && ((ins as i32) >= (range.ins as i32 +range.len)) { // <- If we are adding two negative ranges.
-					// 3,-1; 2,-1 -> 3;-2  abcd abd ab -> 4,-2 <- wait this is corret???
-					// 2,-1; 2,-1 ->  abcd acd ad -> 3,-2 
-					range.ins += (len*-1) as u32;
-					range.len += len;
-					new_range_element_index = -1;
-					break;
-				} 
-				else if (ins >= range.ins) && ((ins as i32) <= (range.ins as i32 +range.len)) { // <- If within the range positive
-					range.len += len;
-					new_range_element_index = -1;
-					break;
-				} else if (ins < range.ins) { // <- If before the positive range
-					new_range_element_index = i as isize;
-					break;
-				} else { // <- If after the range
-					new_range_element_index = i as isize;
-					new_range_element_index += 1;
+				} else if op_ins < range_ins {
+					range_insertion_index = i;
 				}
-			}
-			if delete_range_element_index != -1 {
-				new_oplist.ops.remove(delete_range_element_index as usize);
+
+				aggerate_len += range_len;
 			} 
-			// else if range_len_after_addition < 0 && range_ins_after_addition != -1 {
-			// 	dbg!(new_oplist.clone());
-			// 	new_oplist.ops[delete_range_element_index as usize].ins += range_ins_after_addition as u32
-			// }
-			else if negative_range_element_index != -1 {
-				new_oplist.ops[negative_range_element_index as usize].ins += len as u32
-			}
-			else if new_range_element_index != -1 { // <- If there is a new range to be inserted
-				new_oplist.ops.insert(new_range_element_index as usize, Op { ins, len });
-			} 
-			// dbg!(new_oplist.clone());
 		}
 
+		todo!();
 		return new_oplist;
 	}
 
@@ -133,8 +101,8 @@ fn generate_random_test_data(num_tests: usize) -> OpList {
 	let mut test_data = Vec::with_capacity(num_tests);
 	let mut rng = thread_rng();
 
-	let mut i = 0;
-	while i != num_tests{
+	let mut i: i32 = 0;
+	while i != num_tests as i32{
 		let ins: u32 = rng.gen_range(1..=10); // Generate a random insertion position
 		let len: i32 = rng.gen_range(-5..=5); // Generate a random length
 		if len == 0 || (len + (ins as i32)) < 0 { i-1; continue; } // Do not include 0 len! Do not delete over a negative range!
@@ -147,7 +115,7 @@ fn generate_random_test_data(num_tests: usize) -> OpList {
 
 fn main() {
 	// let mut test_vec: OpList = getOpList([(1,-1),(1,1),(1,1)]); // abcd -> bcd -> bxcd -> byxcd; one way to look at negative range might be to delete from 0 to 1 instead of 1 to -1 but it may be incorrect based on our second variable is len and we don't have any variable to consider negative.
-	let mut test_vec: OpList = generate_random_test_data(1_000_000);
+	let mut test_vec: OpList = generate_random_test_data(4);
 	// dbg!(test_vec.clone());
 	let mut test_vec = test_vec.discontinues_range();
 	// test_vec.prefix_sum();
@@ -163,6 +131,8 @@ fn main() {
 	// All resultant deletes seems to be for the original document
 	// Should probably go though the code again to get a good idea of whats going on. Negative ranges is added normally to positive ranges except for when it removes the range altogether, but for the spicial case of negative case it's added differently.
 	// Potentially create a list to practically test this? It doesn't need to be a text document just a long list. This is like fuzzy testing.
+	
+	// There is an issue with sorting prob because of arrangement of the if else statements, breaking should happen when ins is less than range ins. 
 	
 }
 
@@ -215,8 +185,18 @@ mod tests {
         assert_eq!(test_vec.discontinues_range(), expected_result);
 
 
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 100), (4, 1)]);
-		let expected_result = getOpList([(1, 102), (3, 1)]);
+		// The idea of this sort of list came from the SIMD implementation, len which is what the sorted list is to be compared to represents the original length of the document. If the elements are within the length of the document then they should be added.
+		// The idea is that need to know for each ins position, what is the aggerate length it adds, which is what this exactly finds and also within a single ins we need to find which elements are extending to find figureout concurrent possition.
+		// So the the resultent should be [(index,len)] where the index represents the position of insertion with the context of the original document, and length represents the length of the insertions.
+		// Deletions are a bit complicated, deletions within the newly inserted documents should be reletively easy, but for the original document isn't very easy. New branch (sequential ops) delete should simply detuct the len. 
+		// 2,1;1,1 -> -b-a- -> 1,1;2,1
+		// 1,1;3,1;1,100;4,1;105,1 -> -100ca-db-- -> 1,102;2,1
+		// 1,1;3,1;5,1;7,1 -> -a-b-c-d- -> 1,1;2,1;3,1;4,1 <- taking this as an example, depending on the length of the document we may or may not wana add ins7.
+		// 1,1;3,1;1,1;1,3 -> -cad-b- -> 1,3;2,1
+		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 100), (4, 1), (105,1)]); // <- 104 should technically extend 3? Maybe not? -100ca-b-- d can be extend b at 105/106; therefore compared to [0,inf), 1,102;2,2; I think so its slightly different.
+		let expected_result = getOpList([(1, 102), (3, 1)]); // <- 3 is no longer possible to extend, the idea being that 1 extends to 102, but doesn't extend 3 which doesn't extend anything that isn't extended by 1?
+		
+		dbg!(test_vec.clone().discontinues_range());
 
 		assert_eq!(test_vec.discontinues_range(), expected_result);
 
@@ -260,8 +240,8 @@ mod tests {
         assert_eq!(test_vec.discontinues_range(), expected_result);
 
 
-		let mut test_vec: OpList = getOpList([(3,-1),(2,-1)]); // abcd -> abd -> ab
-        let expected_result = getOpList([(4, -2)]);
+		let mut test_vec: OpList = getOpList([(3,-1),(2,-1)]); // abcd -> abd -> ad
+        let expected_result = getOpList([(3, -2)]); // Should be 3,-2
 
         assert_eq!(test_vec.discontinues_range(), expected_result);
 
@@ -271,4 +251,10 @@ mod tests {
 
         assert_eq!(test_vec.discontinues_range(), expected_result);
     }
+
+
+    #[test]
+    fn test_discontinues_sorting() {
+		todo!() // The ins should be sorted.
+	}
 }
