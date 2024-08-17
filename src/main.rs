@@ -1,4 +1,4 @@
-use std::{iter, usize};
+use std::{iter, u32, usize};
 use rand::{thread_rng, Rng};
 
 // type ins = i32;
@@ -21,8 +21,8 @@ struct OpList {
 
 fn getOpList<const N: usize>(list: [(u32, i32); N]) -> OpList {
 	OpList {
-        ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
-    }
+		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
+	}
 
 }
 
@@ -31,15 +31,15 @@ impl OpList {
 	/// This also assumes that the OpList is sequential according to the time dag.
 	/// 
 	/// [0, inf) <- ins 1 len 100, ins 2 len 12, ins 101 len 1.
-	fn discontinues_range(&self) -> OpList {
+	fn from_oplist_to_sequential_list(&self) -> OpList {
 		// let mut new_oplist = getOpList([(1,0)]); // <- Start with 0 ins with 0 len
 		let mut new_oplist = OpList { ops: vec![
 			Op { ins: self.ops[0].ins, len: 0 }
 		] }; // Start with the first element in the list with the length to be zero
 
 
-        // let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
-        // let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
+		// let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
+		// let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
 		for op in self.ops.iter() {
 			// Current Iins
 			let mut op_ins = op.ins;
@@ -50,28 +50,52 @@ impl OpList {
 			let mut range_insertion_index: usize = usize::MAX;
 			let mut range_insertion_OI: usize = usize::MAX;
 			let mut range_insertion_len: usize = usize::MAX;
-			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
-				let mut range_ins = range.ins + aggerate_len;
-				let mut range_len = range.len;
 
-				if op_ins >= range_ins && op_ins <= range_ins + range_len {
+			let mut start_range: u32;
+			let mut end_range: u32;
+
+			let mut new_range = Op { ins: u32::MAX, len: i32::MAX };
+			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
+				start_range = range.ins + aggerate_len as u32; // considering it as postive for positive ranges for now
+				end_range = start_range + range.len as u32; // considering it as postive for positive ranges for now
+
+				if op_ins >= start_range && op_ins <= end_range { // Add to range
 					range.len += op_len;
+					range_insertion_index = usize::MAX;
 					break;
-				} else if op_ins < range_ins {
+				} else if op_ins < start_range { // Split new insertion in the sequential list.
+					new_range = Op {
+						ins: op_ins - aggerate_len as u32,
+						len: op_len
+					};
 					range_insertion_index = i;
+					break;
+				} else { // if op_ins > start_range && op_ins < end_range i.g. op is after the range
+					new_range = Op {
+						ins: op_ins - aggerate_len as u32,
+						len: op_len
+					};
+					range_insertion_index = i+1; // Just insert after the last range
 				}
 
-				aggerate_len += range_len;
-			} 
+				aggerate_len += range.len;
+			}
+
+			if range_insertion_index != usize::MAX {
+				assert!(new_range != Op { ins: u32::MAX, len: i32::MAX }); // this is more or less a placeholder.
+				new_oplist.ops.insert(range_insertion_index as usize, new_range)
+			}
 		}
 
-		todo!();
+		// todo!();
 		return new_oplist;
 	}
 
-	fn prefix_sum(&mut self) {
+	/// Convert sequential_list into a oplist
+	fn from_sequential_list_to_oplist(&mut self) {
+		// incorrect
 		for i in 1..self.ops.len() {
-			self.ops[i].len += self.ops[i-1].len
+			self.ops[i].ins += self.ops[i-1].len as u32;
 		}
 	}
 
@@ -113,14 +137,33 @@ fn generate_random_test_data(num_tests: usize) -> OpList {
 	OpList { ops: test_data }
 }
 
+
+/// Old code: generating only positive random test data for testing. 
+fn generate_only_positive_random_test_data(num_tests: usize) -> OpList {
+	let mut test_data = Vec::with_capacity(num_tests);
+	let mut rng = thread_rng();
+
+	for _ in 0..num_tests {
+		let ins = rng.gen_range(1..=10); // Generate a random insertion position
+		let len = rng.gen_range(1..=10); // Generate a random length
+		test_data.push(Op { ins, len });
+	}
+
+	OpList { ops: test_data }
+}
+
+
 fn main() {
 	// let mut test_vec: OpList = getOpList([(1,-1),(1,1),(1,1)]); // abcd -> bcd -> bxcd -> byxcd; one way to look at negative range might be to delete from 0 to 1 instead of 1 to -1 but it may be incorrect based on our second variable is len and we don't have any variable to consider negative.
-	let mut test_vec: OpList = generate_random_test_data(4);
-	// dbg!(test_vec.clone());
-	let mut test_vec = test_vec.discontinues_range();
+	// let mut test_vec: OpList = generate_random_test_data(4);
+	let mut test_vec: OpList = generate_only_positive_random_test_data(4);
+	let mut test_vec: OpList = getOpList([(5,1), (7,1), (9,7), (5,6)]);
+	dbg!(test_vec.clone());
+	let mut test_vec = test_vec.from_oplist_to_sequential_list();
 	// test_vec.prefix_sum();
 	// test_vec.clearn_delete(); // For readibility
-	dbg!(test_vec);
+	dbg!(test_vec.clone());
+	// dbg!(test_vec.from_oplist_to_sequential_list());
 
 	// Say once we have two of these results, how should they combine? We can simply create a new list with the two results and call discontinues_range() on it.
 
@@ -175,14 +218,14 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn test_discontinues_positive_range_result() {
-        let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (4, 1)]);
-        let expected_result = getOpList([(1, 2), (3, 2)]);
+	#[test]
+	fn test_discontinues_positive_range_result() {
+		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (4, 1)]);
+		let expected_result = getOpList([(1, 2), (3, 2)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
 		// The idea of this sort of list came from the SIMD implementation, len which is what the sorted list is to be compared to represents the original length of the document. If the elements are within the length of the document then they should be added.
@@ -196,65 +239,65 @@ mod tests {
 		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 100), (4, 1), (105,1)]); // <- 104 should technically extend 3? Maybe not? -100ca-b-- d can be extend b at 105/106; therefore compared to [0,inf), 1,102;2,2; I think so its slightly different.
 		let expected_result = getOpList([(1, 102), (3, 1)]); // <- 3 is no longer possible to extend, the idea being that 1 extends to 102, but doesn't extend 3 which doesn't extend anything that isn't extended by 1?
 		
-		dbg!(test_vec.clone().discontinues_range());
+		dbg!(test_vec.clone().from_oplist_to_sequential_list());
 
-		assert_eq!(test_vec.discontinues_range(), expected_result);
-
-
-        let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
-        let expected_result = getOpList([(1, 2), (3, 1), (5,1)]);
-
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
-        let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (3, 1)]);
-        let expected_result = getOpList([(1, 3), (3, 1)]);
+		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
+		let expected_result = getOpList([(1, 2), (3, 1), (5,1)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
-        let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
-        let expected_result = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
+		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (3, 1)]);
+		let expected_result = getOpList([(1, 3), (3, 1)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
-    }
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
-    #[test]
-    fn test_discontinues_negative_range_result() {
+
+		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
+		let expected_result = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
+
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+	}
+
+	#[test]
+	fn test_discontinues_negative_range_result() {
 		let mut test_vec: OpList = getOpList([(1,1),(2,-2),(1,-1)]); // 1,1 + 2,-2 -> 1,-1 + 1,-1 -> 2,-2; abcd axbcd bcd cd
-        let expected_result = getOpList([(2, -2)]);
+		let expected_result = getOpList([(2, -2)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
-		let mut test_vec: OpList = getOpList([(95, 18), (98, 4), (22, 44), (98, -39)]).discontinues_range();
-		test_vec.prefix_sum();
+		let mut test_vec: OpList = getOpList([(95, 18), (98, 4), (22, 44), (98, -39)]).from_oplist_to_sequential_list();
+		// test_vec.prefix_sum();
 		let expected_result = getOpList([(22, 44), (95, 27)]);
 
 		assert_eq!(test_vec, expected_result);
 
 
 		let mut test_vec: OpList = getOpList([(1,-1),(1,1),(1,1)]); // abcd -> bcd -> bxcd -> byxcd; one way to look at negative range might be to delete from 0 to 1 instead of 1 to -1 but it may be incorrect based on our second variable is len and we don't have any variable to consider negative
-        let expected_result = getOpList([(1, -1), (1, 2)]);
+		let expected_result = getOpList([(1, -1), (1, 2)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
 		let mut test_vec: OpList = getOpList([(3,-1),(2,-1)]); // abcd -> abd -> ad
-        let expected_result = getOpList([(3, -2)]); // Should be 3,-2
+		let expected_result = getOpList([(3, -2)]); // Should be 3,-2
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
 
 		let mut test_vec: OpList = getOpList([(2,-1),(2,-1)]); // abcd -> acd -> ad
-        let expected_result = getOpList([(3, -2)]);
+		let expected_result = getOpList([(3, -2)]);
 
-        assert_eq!(test_vec.discontinues_range(), expected_result);
-    }
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+	}
 
 
-    #[test]
-    fn test_discontinues_sorting() {
+	#[test]
+	fn test_discontinues_sorting() {
 		todo!() // The ins should be sorted.
 	}
 }
