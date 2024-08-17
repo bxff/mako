@@ -37,6 +37,7 @@ impl OpList {
 			Op { ins: self.ops[0].ins, len: 0 }
 		] }; // Start with the first element in the list with the length to be zero
 
+		let mut new_oplist = getOpList([(1,1),(2,1),(4,-1),(5,1)]);
 
 		// let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
 		// let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
@@ -52,25 +53,24 @@ impl OpList {
 			let mut range_insertion_len: usize = usize::MAX;
 
 			let mut start_range: u32;
-			let mut end_range: u32;
+			let mut end_range: u32 = u32::MAX;
 
 			let mut new_range = Op { ins: u32::MAX, len: i32::MAX };
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
-				// This may be negative...
-				// Also we need to handle negate ranges.
-
 				if range.len.is_negative() { // if we itering a negative range, we just want to check for splitting 
 					// it can't really extend, more like insert in between or extend the delete.
 
-					start_range = end_range; // previous end range, we need this as we need previous op.ins to find ending.
-					end_range = range.ins + aggerate_len as u32; // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
-
+					// This has to be fixed this is probably wrong
+					if end_range == u32::MAX {
+						start_range = end_range; // previous end range, we need this as we need previous op.ins to find ending.
+					} else { start_range = 0 }
+					if (range.ins as i32 + aggerate_len) < 0 {
+						end_range = (range.ins as i32 + aggerate_len) as u32; // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
+					} else { end_range = end_range }
 
 
 					// continue from here, just need to implement delete ranges effects on postive ins, and then RLEd delete ranges.
 					// test for if delete ranges effect on positive ins is correct.
-
-
 
 					if op_ins >= start_range && op_ins <= end_range { // Split new insertion in the sequential list.
 						new_range = Op {
@@ -88,9 +88,12 @@ impl OpList {
 					}
 
 					aggerate_len += range.len;
-					break;
+					// aggerate_len += 100;
+					continue;
 				}
 
+				// This may be negative...
+				// Also we need to handle negate ranges.
 				start_range = range.ins + aggerate_len as u32; // considering it as postive for positive ranges for now
 				end_range = start_range + range.len as u32; // considering it as postive for positive ranges for now
 
@@ -193,6 +196,9 @@ fn main() {
 	// let mut test_vec: OpList = generate_random_test_data(4);
 	let mut test_vec: OpList = generate_only_positive_random_test_data(4);
 	let mut test_vec: OpList = getOpList([(5,1), (7,1), (9,7), (5,6)]);
+	// let mut test_vec: OpList = getOpList([]);
+	// let mut test_vec: OpList = getOpList([(4,1)]);
+	let mut test_vec: OpList = getOpList([(6,1)]); // test based on 4,1;5,1;6,1
 	dbg!(test_vec.clone());
 	let mut test_vec = test_vec.from_oplist_to_sequential_list();
 	// test_vec.prefix_sum();
