@@ -56,6 +56,41 @@ impl OpList {
 
 			let mut new_range = Op { ins: u32::MAX, len: i32::MAX };
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
+				// This may be negative...
+				// Also we need to handle negate ranges.
+
+				if range.len.is_negative() { // if we itering a negative range, we just want to check for splitting 
+					// it can't really extend, more like insert in between or extend the delete.
+
+					start_range = end_range; // previous end range, we need this as we need previous op.ins to find ending.
+					end_range = range.ins + aggerate_len as u32; // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
+
+
+
+					// continue from here, just need to implement delete ranges effects on postive ins, and then RLEd delete ranges.
+					// test for if delete ranges effect on positive ins is correct.
+
+
+
+					if op_ins >= start_range && op_ins <= end_range { // Split new insertion in the sequential list.
+						new_range = Op {
+							ins: op_ins - aggerate_len as u32,
+							len: op_len
+						};
+						range_insertion_index = i;
+						break;	
+					} else { // if op_ins > start_range && op_ins < end_range i.g. op is after the range
+						new_range = Op {
+							ins: op_ins - aggerate_len as u32,
+							len: op_len
+						};
+						range_insertion_index = i+1; // Just insert after the last range
+					}
+
+					aggerate_len += range.len;
+					break;
+				}
+
 				start_range = range.ins + aggerate_len as u32; // considering it as postive for positive ranges for now
 				end_range = start_range + range.len as u32; // considering it as postive for positive ranges for now
 
@@ -79,7 +114,7 @@ impl OpList {
 				}
 
 				aggerate_len += range.len;
-			}
+			} 
 
 			if range_insertion_index != usize::MAX {
 				assert!(new_range != Op { ins: u32::MAX, len: i32::MAX }); // this is more or less a placeholder.
