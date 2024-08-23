@@ -1,5 +1,6 @@
-use std::{iter, u32, usize};
+use std::{i128::MAX, iter, u32, usize};
 use rand::{thread_rng, Rng};
+
 
 // type ins = i32;
 // type len = i32;
@@ -7,23 +8,40 @@ use rand::{thread_rng, Rng};
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Op {
 	// OpType: OpType,
-	ins: u32,
-	len: i32
+	ins: i32, // i32 is used as other wise there is a lot of conversions, its better to expose the API as u32.
+	len: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct OpList {
-	ops: Vec<Op> // <- Consider using arrayvec / tinyvec / smallvec if there is a huge amount of array creation / deletion.
+	ops: Vec<Op>, // <- Consider using arrayvec / tinyvec / smallvec if there is a huge amount of array creation / deletion.
+	test_op: Option<Vec<(i32, i32)>>, // For testing, to be removed
 }
 
 // set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe" 
 // https://github.com/nico-abram/blondie
 
-fn getOpList<const N: usize>(list: [(u32, i32); N]) -> OpList {
+fn getOpList<const N: usize>(list: [(i32, i32); N]) -> OpList {
 	OpList {
 		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
+		test_op: None
 	}
+}
 
+/// Same as getOpList, just takes Vec as input
+fn getOpListbyVec(list: Vec<(i32, i32)>) -> OpList {
+	OpList {
+		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
+		test_op: None
+	}
+}
+
+/// Same as getOpList, just for testing converts the test_op as already existing range list
+fn getOpListforTesting<const N: usize, const M: usize>(pre_existing_range_list: [(i32, i32); N], oplist: [(i32, i32); M]) -> OpList {
+	OpList {
+		ops: oplist.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
+		test_op: Some(pre_existing_range_list.into_iter().map(|(ins, len)| (ins, len) ).collect())
+	}
 }
 
 impl OpList {
@@ -32,12 +50,18 @@ impl OpList {
 	/// 
 	/// [0, inf) <- ins 1 len 100, ins 2 len 12, ins 101 len 1.
 	fn from_oplist_to_sequential_list(&self) -> OpList {
-		// let mut new_oplist = getOpList([(1,0)]); // <- Start with 0 ins with 0 len
-		let mut new_oplist = OpList { ops: vec![
-			Op { ins: self.ops[0].ins, len: 0 }
-		] }; // Start with the first element in the list with the length to be zero
+		// Use test data if provided for the range_list (i.g. new_oplist)
+		let mut new_oplist: OpList = OpList { ops: vec![], test_op: None };
+		if self.test_op.is_some() {
+			new_oplist = getOpListbyVec(self.test_op.clone().unwrap());
+		} else {
+			new_oplist = OpList { ops: vec![
+				Op { ins: self.ops[0].ins, len: 0 },
+			],test_op: None }; // Start with the first element in the list with the length to be zero
 
-		let mut new_oplist = getOpList([(1,1),(2,1),(4,-1),(5,1)]);
+			// let mut new_oplist = getOpList([(1,1),(2,1),(4,-1),(5,1)]);
+			// let mut new_oplist = getOpList([(5,-2),(6,1),(7,1)]);
+		}
 
 		// let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
 		// let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
@@ -52,65 +76,106 @@ impl OpList {
 			let mut range_insertion_OI: usize = usize::MAX;
 			let mut range_insertion_len: usize = usize::MAX;
 
-			let mut start_range: u32;
-			let mut end_range: u32 = u32::MAX;
+			let mut start_range: i32;
+			let mut end_range: i32 = i32::MAX;
 
-			let mut new_range = Op { ins: u32::MAX, len: i32::MAX };
+			let mut new_range = Op { ins: i32::MAX, len: i32::MAX };
+
+			// required for fixing elements which are already deleted in the orignal and are extended.
+			let mut previous_delete_range_start: i32 = i32::MAX;
+			let mut previous_delete_range_end: i32 = i32::MAX;
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
 				if range.len.is_negative() { // if we itering a negative range, we just want to check for splitting 
+
+					// This block is basically checking for split insertions just before a negative range.
+
 					// it can't really extend, more like insert in between or extend the delete.
 
+					// 7,-2 -> 7,9
+					previous_delete_range_start = range.ins;
+					previous_delete_range_end = previous_delete_range_start + (-range.len);
+
+
 					// This has to be fixed this is probably wrong
-					if end_range == u32::MAX {
+					if end_range != i32::MAX {
 						start_range = end_range; // previous end range, we need this as we need previous op.ins to find ending.
 					} else { start_range = 0 }
-					if (range.ins as i32 + aggerate_len) < 0 {
-						end_range = (range.ins as i32 + aggerate_len) as u32; // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
-					} else { end_range = end_range }
-
+					if (range.ins as i32 + aggerate_len) > 0 {
+						end_range = (range.ins as i32 + aggerate_len); // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
+					} else { end_range = range.ins }
+					// dbg!(start_range);
+					// dbg!(end_range);
 
 					// continue from here, just need to implement delete ranges effects on postive ins, and then RLEd delete ranges.
 					// test for if delete ranges effect on positive ins is correct.
+					
+					// implement deletes effect on new positive insertion
+					// implement deletes which original lenghts of new insertion
+					// implement rle delete
 
 					if op_ins >= start_range && op_ins <= end_range { // Split new insertion in the sequential list.
 						new_range = Op {
-							ins: op_ins - aggerate_len as u32,
+							ins: op_ins - aggerate_len,
 							len: op_len
 						};
-						range_insertion_index = i;
+						range_insertion_index = i; // If we are inserting within a deleted range, we would want the insert to go after the delete; nah its afterwords would be handled ahead
 						break;	
 					} else { // if op_ins > start_range && op_ins < end_range i.g. op is after the range
 						new_range = Op {
-							ins: op_ins - aggerate_len as u32,
+							ins: op_ins - aggerate_len - range.len, // basically if we are inserting after the range, we would also want the range len included in aggerate len
 							len: op_len
 						};
 						range_insertion_index = i+1; // Just insert after the last range
 					}
 
-					aggerate_len += range.len;
+					aggerate_len += range.len; // Unsure if we wana do that: [(5,-2),(6,len),(7,len)]; well maybe not as this works well for range.
 					// aggerate_len += 100;
 					continue;
 				}
 
 				// This may be negative...
 				// Also we need to handle negate ranges.
-				start_range = range.ins + aggerate_len as u32; // considering it as postive for positive ranges for now
-				end_range = start_range + range.len as u32; // considering it as postive for positive ranges for now
+				// if range.ins > /* Not >= as it would always be more */ previous_delete_range_ins && range.ins <= (previous_delete_range_ins + (-previous_delete_range_len as u32)) {
+				if range.ins > previous_delete_range_start && range.ins <= previous_delete_range_end {
+
+					// This block basically changes start positions of ranges whose original length has been deleted.
+					
+					// 7,-2 -> 7 + 2 + (agg_len-2)
+					// as i32 as agg_len could be negative: [(5,-2),(6,len),(7,len)]
+					start_range = (previous_delete_range_start + (previous_delete_range_end - previous_delete_range_start) + aggerate_len);
+				} else { start_range = range.ins + aggerate_len; } // considering it as postive for positive ranges for now
+				end_range = start_range + range.len; // considering it as postive for positive ranges for now
+
+				// aggerate_len += range.len;
+
+				// Possibly could proof check here?
+				// dbg!(start_range);
+				// dbg!(end_range);
 
 				if op_ins >= start_range && op_ins <= end_range { // Add to range
 					range.len += op_len;
 					range_insertion_index = usize::MAX;
 					break;
 				} else if op_ins < start_range { // Split new insertion in the sequential list.
+					// This shouldn't be possible within original length deleted elements as we can't be before the start range as we manually iter throught it before.
+					// [(5,-2),(6,len),(7,len)] as we check first 0 to 3 then 6s and 7s length.
 					new_range = Op {
-						ins: op_ins - aggerate_len as u32,
+						ins: op_ins - aggerate_len,
 						len: op_len
 					};
 					range_insertion_index = i;
 					break;
 				} else { // if op_ins > start_range && op_ins < end_range i.g. op is after the range
+
+					// the problem is u32 overflow, this can be fixed if I just use i32 and assert.
+
+					// dbg!(op_ins - aggerate_len);
+					// dbg!(op_ins);
+					// dbg!(aggerate_len);
+					// dbg!(op_len);
+
 					new_range = Op {
-						ins: op_ins - aggerate_len as u32,
+						ins: op_ins - aggerate_len - range.len, // basically if we are inserting after the range, we would also want the range len included in aggerate len
 						len: op_len
 					};
 					range_insertion_index = i+1; // Just insert after the last range
@@ -120,7 +185,7 @@ impl OpList {
 			} 
 
 			if range_insertion_index != usize::MAX {
-				assert!(new_range != Op { ins: u32::MAX, len: i32::MAX }); // this is more or less a placeholder.
+				assert!(new_range != Op { ins: i32::MAX, len: i32::MAX }); // this is more or less a placeholder.
 				new_oplist.ops.insert(range_insertion_index as usize, new_range)
 			}
 		}
@@ -133,7 +198,7 @@ impl OpList {
 	fn from_sequential_list_to_oplist(&mut self) {
 		// incorrect
 		for i in 1..self.ops.len() {
-			self.ops[i].ins += self.ops[i-1].len as u32;
+			self.ops[i].ins += self.ops[i-1].len;
 		}
 	}
 
@@ -143,7 +208,7 @@ impl OpList {
 		for op in self.ops.iter_mut() {
 			if op.len < 0 {
 				let ins = op.ins;
-				op.ins = (op.ins as i32 + op.len) as u32;
+				op.ins = (op.ins as i32 + op.len);
 				op.len = -(ins as i32);
 			}
 		}
@@ -165,14 +230,14 @@ fn generate_random_test_data(num_tests: usize) -> OpList {
 
 	let mut i: i32 = 0;
 	while i != num_tests as i32{
-		let ins: u32 = rng.gen_range(1..=10); // Generate a random insertion position
+		let ins: i32 = rng.gen_range(1..=10); // Generate a random insertion position
 		let len: i32 = rng.gen_range(-5..=5); // Generate a random length
 		if len == 0 || (len + (ins as i32)) < 0 { i-1; continue; } // Do not include 0 len! Do not delete over a negative range!
 		test_data.push(Op { ins, len });
 		i += 1;
 	}
 
-	OpList { ops: test_data }
+	OpList { ops: test_data, test_op: None }
 }
 
 
@@ -187,7 +252,7 @@ fn generate_only_positive_random_test_data(num_tests: usize) -> OpList {
 		test_data.push(Op { ins, len });
 	}
 
-	OpList { ops: test_data }
+	OpList { ops: test_data, test_op: None }
 }
 
 
@@ -198,7 +263,9 @@ fn main() {
 	let mut test_vec: OpList = getOpList([(5,1), (7,1), (9,7), (5,6)]);
 	// let mut test_vec: OpList = getOpList([]);
 	// let mut test_vec: OpList = getOpList([(4,1)]);
-	let mut test_vec: OpList = getOpList([(6,1)]); // test based on 4,1;5,1;6,1
+
+	// let mut test_vec: OpList = getOpListforTesting([(5,-2),(6,1),(7,1)], [(8,1)]);
+	// let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(8,1)]);
 	dbg!(test_vec.clone());
 	let mut test_vec = test_vec.from_oplist_to_sequential_list();
 	// test_vec.prefix_sum();
@@ -262,83 +329,39 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_discontinues_positive_range_result() {
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (4, 1)]);
-		let expected_result = getOpList([(1, 2), (3, 2)]);
-
+	fn test_whats_already_implemented() {
+		// Testing for inserting after all the ranges.
+		let mut test_vec: OpList = getOpListforTesting([(5,-1)], [(7,1)]);
+		let expected_result = getOpList([(5, -1), (8, 1)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+		let mut test_vec: OpList = getOpListforTesting([(5,1)], [(7,1)]);
+		let expected_result = getOpList([(5, 1), (6, 1)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
-
-		// The idea of this sort of list came from the SIMD implementation, len which is what the sorted list is to be compared to represents the original length of the document. If the elements are within the length of the document then they should be added.
-		// The idea is that need to know for each ins position, what is the aggerate length it adds, which is what this exactly finds and also within a single ins we need to find which elements are extending to find figureout concurrent possition.
-		// So the the resultent should be [(index,len)] where the index represents the position of insertion with the context of the original document, and length represents the length of the insertions.
-		// Deletions are a bit complicated, deletions within the newly inserted documents should be reletively easy, but for the original document isn't very easy. New branch (sequential ops) delete should simply detuct the len. 
-		// 2,1;1,1 -> -b-a- -> 1,1;2,1
-		// 1,1;3,1;1,100;4,1;105,1 -> -100ca-db-- -> 1,102;2,1
-		// 1,1;3,1;5,1;7,1 -> -a-b-c-d- -> 1,1;2,1;3,1;4,1 <- taking this as an example, depending on the length of the document we may or may not wana add ins7.
-		// 1,1;3,1;1,1;1,3 -> -cad-b- -> 1,3;2,1
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 100), (4, 1), (105,1)]); // <- 104 should technically extend 3? Maybe not? -100ca-b-- d can be extend b at 105/106; therefore compared to [0,inf), 1,102;2,2; I think so its slightly different.
-		let expected_result = getOpList([(1, 102), (3, 1)]); // <- 3 is no longer possible to extend, the idea being that 1 extends to 102, but doesn't extend 3 which doesn't extend anything that isn't extended by 1?
+		// Test cases for: 1234567 -> 123456-7= -> 12345-=
+		let mut test_vec: OpList = getOpListforTesting([(5,-2),(6,1),(7,1)], [(5,1)]);
+		let expected_result = getOpList([(5,1),(5,-2),(6,1),(7,1)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+		let mut test_vec: OpList = getOpListforTesting([(5,-2),(6,1),(7,1)], [(6,1)]);
+		let expected_result = getOpList([(5,-2),(6,2),(7,1)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+		let mut test_vec: OpList = getOpListforTesting([(5,-2),(6,1),(7,1)], [(8,1)]);
+		let expected_result = getOpList([(5,-2),(6,1),(7,1),(8,1)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 		
-		dbg!(test_vec.clone().from_oplist_to_sequential_list());
-
+		// Test cases for 1-2-35-
+		let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(4,1)]);
+		let expected_result = getOpList([(1,1),(2,2),(3,-1),(5,1)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
-		let expected_result = getOpList([(1, 2), (3, 1), (5,1)]);
-
+		let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(5,1)]);
+		let expected_result = getOpList([(1,1),(2,1),(3,1),(3,-1),(5,1)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (3, 1)]);
-		let expected_result = getOpList([(1, 3), (3, 1)]);
-
+		let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(6,1)]);
+		let expected_result = getOpList([(1,1),(2,1),(3,-1),(5,2)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
-		let expected_result = getOpList([(1, 1), (3, 1), (5, 1), (7, 1)]);
-
+		let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(8,1)]);
+		let expected_result = getOpList([(1,1),(2,1),(3,-1),(5,1),(6,1)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 	}
 
-	#[test]
-	fn test_discontinues_negative_range_result() {
-		let mut test_vec: OpList = getOpList([(1,1),(2,-2),(1,-1)]); // 1,1 + 2,-2 -> 1,-1 + 1,-1 -> 2,-2; abcd axbcd bcd cd
-		let expected_result = getOpList([(2, -2)]);
-
-		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(95, 18), (98, 4), (22, 44), (98, -39)]).from_oplist_to_sequential_list();
-		// test_vec.prefix_sum();
-		let expected_result = getOpList([(22, 44), (95, 27)]);
-
-		assert_eq!(test_vec, expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(1,-1),(1,1),(1,1)]); // abcd -> bcd -> bxcd -> byxcd; one way to look at negative range might be to delete from 0 to 1 instead of 1 to -1 but it may be incorrect based on our second variable is len and we don't have any variable to consider negative
-		let expected_result = getOpList([(1, -1), (1, 2)]);
-
-		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(3,-1),(2,-1)]); // abcd -> abd -> ad
-		let expected_result = getOpList([(3, -2)]); // Should be 3,-2
-
-		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-
-		let mut test_vec: OpList = getOpList([(2,-1),(2,-1)]); // abcd -> acd -> ad
-		let expected_result = getOpList([(3, -2)]);
-
-		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-	}
-
-
-	#[test]
-	fn test_discontinues_sorting() {
-		todo!() // The ins should be sorted.
-	}
 }
