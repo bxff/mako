@@ -152,6 +152,14 @@ impl OpList {
 									orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
 									orignal_doc_delete_range.len = end_range - aggerate_len - orignal_doc_delete_range.ins; // end range - delete start
 									range_delete_index = i;
+
+									// As delete is extending beyond another delete, we add that delete on this list and queue the delete range to be deleted.
+									orignal_doc_delete_range.len -= range.len;
+									aggerate_len += range.len;
+									range.len = 0;
+									if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
+										to_delete_zero_ranges_from = i;
+									}
 									
 									op_len = op_ins - op_len - (end_range); // delete end - end range
 									op_ins = end_range; // end range
@@ -569,7 +577,7 @@ fn main() {
 	// let mut test_vec: OpList = generate_only_positive_random_test_data(4);
 	// let mut test_vec: OpList = getOpList([(5,1), (7,1), (9,7), (5,6)]);
 	// let mut test_vec: OpList = getOpList([]);
-	let mut test_vec: OpList = getOpList([(5,-1),(3,-1),(6,3),(2,-1)]);
+	let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127
 
 	// let mut test_vec: OpList = getOpListforTesting([(5,1),(5,-2),(6,1),(7,1)], [(8,-3)]);
 	// let mut test_vec: OpList = getOpListforTesting([(7,1),(7,-1)], [(8,-2)]);
@@ -653,6 +661,9 @@ mod tests {
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 		let mut test_vec: OpList = getOpList([(5,-1),(3,-1),(6,3),(2,-1)]); // hard to understand
 		let expected_result = getOpList([(1,-2),(4,-1),(8,3)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+		let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127; Testing for delete RLE within delete RLE
+		let expected_result = getOpList([(2,-4)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 	}
 
