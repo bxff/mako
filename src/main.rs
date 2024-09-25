@@ -1,3 +1,5 @@
+mod RangeHashMap;
+
 use std::{i128::MAX, i32};
 
 use rand::{thread_rng, Rng};
@@ -572,23 +574,14 @@ fn generate_only_positive_random_test_data(num_tests: usize) -> OpList {
 
 
 fn main() {
-	// let mut test_vec: OpList = getOpList([(1,-1),(1,1),(1,1)]); // abcd -> bcd -> bxcd -> byxcd; one way to look at negative range might be to delete from 0 to 1 instead of 1 to -1 but it may be incorrect based on our second variable is len and we don't have any variable to consider negative.
-	// let mut test_vec: OpList = generate_random_test_data(4);
-	// let mut test_vec: OpList = generate_only_positive_random_test_data(4);
-	// let mut test_vec: OpList = getOpList([(5,1), (7,1), (9,7), (5,6)]);
-	// let mut test_vec: OpList = getOpList([]);
-	let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127
+	// let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127
 
-	// let mut test_vec: OpList = getOpListforTesting([(5,1),(5,-2),(6,1),(7,1)], [(8,-3)]);
-	// let mut test_vec: OpList = getOpListforTesting([(7,1),(7,-1)], [(8,-2)]);
-	// let mut test_vec: OpList = getOpListforTesting([(5,-1),(7,-1)], [(6,-1)]);
-	// let mut test_vec: OpList = getOpListforTesting([(1,1),(2,1),(3,-1),(5,1)], [(8,1)]);
-	dbg!(test_vec.clone());
-	let mut test_vec = test_vec.from_oplist_to_sequential_list();
-	// test_vec.prefix_sum();
-	// test_vec.clearn_delete(); // For readibility
-	dbg!(test_vec.clone());
-	// dbg!(test_vec.from_oplist_to_sequential_list());
+	RangeHashMap::todo();
+
+	// dbg!(test_vec.clone());
+	// let mut test_vec = test_vec.from_oplist_to_sequential_list();
+	// dbg!(test_vec.clone());
+	// RangeHashMap::todo();
 
 	// Say once we have two of these results, how should they combine? We can simply create a new list with the two results and call discontinues_range() on it.
 
