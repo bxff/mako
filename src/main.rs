@@ -605,9 +605,34 @@ mod tests {
 	fn test_whats_already_implemented() {
 		// Testing for inserting after all the ranges.
 
-        // getOpListforTesting(pre_existing, new_additions) 
-        //   -> pre_existing is the result from getOpList(some_previous_ops) which we add new_additions to.
-        //   ~ equivalent to getOpList(some_previous_ops + new_additions)
+		// getOpListforTesting(getOpList(ops).from_oplist_to_sequential_list(), new_ops_to_add).from_oplist_to_sequential_list()
+		//   -> equvalent to getOpList(ops + new_ops_to_add).from_oplist_to_sequential_list()
+
+		// The state we get from_oplist_to_sequential_list is a special state
+		//   -> we consider some base state, [0,inf) (we showcase this by 123456789...)
+		//   -> deletes are special case here which represents deletes within [0,inf) 
+		//      (e.g. [(5,-2)] would delete 6 & 7 in 123456789... always left to right)
+		//   -> inserts are on top of base state, they are always in context of [0,inf),
+		//      e.g. [(5,1)] would be a in 12345a6789, but note the context could also 
+		//      been deleted, e.g. [(5,-1),(5,1)] would be a in 1234a6789, [(5,-2),(5,1),(6,1)] 
+		//      would be a & b in 1234ab6789. By rule we take negative len first for the 
+		//      same position, i.g. (5,-len) always comes before (5,+len)
+		// The new_ops_to_add are added to state from_oplist_to_sequential_list by getOpListforTesting
+		// getOpList also essentially creates the state by iterating over ops and changing the state one op at a time
+		//   -> inserting an op to the state would require finding it's context in terms of [0,inf)
+		//      e.g. for the state [(5,-1),(5,1)] would be a in 1234a6789, and if we insert [(5,1)]
+		//      would be b in in 1234ab6789 and new state would be [(5,-1),(5,2)], and if we insert [(4,1)]
+		//      would be b in in 1234ba6789 and new state would be [(4,1),(5,-1),(5,1)]. Note we find the 
+		//      insertion position from the normal positioning, but store it in the context of [0,inf)
+		//   -> deletes are similarly operated, they are found using the normal positing, i.g. 7,-1 means
+		//      we are deleting the 7th position element, and we find the 7th position element in context of [0,inf)
+		//      e.g. 5,-1 op onto the state of [(5,-1),(5,1)] would mean deleting a in 1234a6789, and the new
+		//      state would be [(5,-1)], further if we delete again the 5,-1 op we'd get the new state of [(5,-2)]
+		//   -> deletes & inserts RLE, i.g. the ops [(5,-1),(6,-1)] should always become the state [(5,-2)],
+		//      a more complex example ops [(5,-2),(4,-2)] should always become the state [(2,-4)], as
+		//      in 123456789 we delete 45 (as this is the normal op, left to right), then we delete
+		//      36. Similerly for the state [(5,-1),(7,-1)], if we apply the op [(6,-1)], then the new state
+		//      would be [(5,-3)]
 
         // Base = 1234567890...
         // Pre existing = 123457890...
