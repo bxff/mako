@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 mod RangeHashMap;
 
 use std::{i128::MAX, i32};
