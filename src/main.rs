@@ -240,40 +240,6 @@ impl OpList {
 									original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 									break;	
 								}
-							} else if i == ops_len - 1 {
-								// Last element handling
-								if op_len.is_positive() {
-									new_range = Op {
-										ins: op_ins - aggregate_len - range.len,
-										len: op_len
-									};
-									range_insertion_index = i + 1;
-								} else {
-									if original_doc_delete_range.ins == i32::MAX {
-										original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
-										original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-										range_delete_index = i + 1;
-									} else {
-										original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-									}
-								}
-							}
-						}
-					} else if i == ops_len - 1 {
-						// Operation is after the range
-						if op_len.is_positive() {
-							new_range = Op {
-								ins: op_ins - aggregate_len - range.len,
-								len: op_len
-							};
-							range_insertion_index = i + 1;
-						} else {
-							if original_doc_delete_range.ins == i32::MAX {
-								original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
-								original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-								range_delete_index = i + 1;
-							} else {
-								original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
 							}
 						}
 					}
@@ -334,15 +300,6 @@ impl OpList {
 							dbg!(range.clone());
 							range_insertion_index = usize::MAX;
 							break;
-						} else if i == ops_len - 1 {
-							// Last element handling
-							if original_doc_delete_range.ins == i32::MAX {
-								original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
-								original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-								range_delete_index = i + 1;
-							} else {
-								original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-							}
 						}
 					}
 				} else if op_ins < start_range {
@@ -427,29 +384,6 @@ impl OpList {
 								break;
 							}
 						}	
-					}
-				} else if i == ops_len - 1 {
-					// Operation is after the range
-					if op_len.is_positive() {
-						new_range = Op {
-							ins: op_ins - aggregate_len - range.len,
-							len: op_len
-						};
-						range_insertion_index = i + 1;
-					} else {
-						if original_doc_delete_range.ins == i32::MAX {
-							dbg!("hello 1");
-							dbg!(start_range);
-							dbg!(end_range);
-							dbg!(op_ins - range.len - aggregate_len);
-							dbg!((op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len));
-							dbg!(-op_len);
-							original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
-							original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-							range_delete_index = i + 1;
-						} else {
-							original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
-						}
 					}
 				}
 
