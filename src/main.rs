@@ -159,7 +159,7 @@ impl OpList {
 			let mut last_delete_range_end: InsertPos = i32::MAX;
 			let mut last_delete_range_index: usize = usize::MAX;
 
-			let ops_len = new_oplist.ops.len();
+			let new_oplist_len = new_oplist.ops.len();
 			// Process each range in the current new_oplist
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
 				dbg!(op_ins);
@@ -240,7 +240,7 @@ impl OpList {
 									original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 									break;	
 								}
-							} else if i == ops_len - 1 {
+							} else if i == new_oplist_len - 1 {
 								// Last element handling
 								if op_len.is_positive() {
 									new_range = Op {
@@ -259,7 +259,7 @@ impl OpList {
 								}
 							}
 						}
-					} else if i == ops_len - 1 {
+					} else if i == new_oplist_len - 1 {
 						// Operation is after the range
 						if op_len.is_positive() {
 							new_range = Op {
@@ -334,7 +334,7 @@ impl OpList {
 							dbg!(range.clone());
 							range_insertion_index = usize::MAX;
 							break;
-						} else if i == ops_len - 1 {
+						} else if i == new_oplist_len - 1 {
 							// Last element handling
 							if original_doc_delete_range.ins == i32::MAX {
 								original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
@@ -428,7 +428,7 @@ impl OpList {
 							}
 						}	
 					}
-				} else if i == ops_len - 1 {
+				} else if i == new_oplist_len - 1 {
 					// Operation is after the range
 					if op_len.is_positive() {
 						new_range = Op {
