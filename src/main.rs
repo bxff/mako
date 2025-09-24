@@ -6,43 +6,50 @@ use std::{i128::MAX, i32};
 
 use rand::{thread_rng, Rng};
 
-
-// type ins = i32;
-// type len = i32;
+// Type aliases for better readability
+type InsertPos = i32;
+type Length = i32;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Op {
-	// OpType: OpType,
-	ins: i32, // i32 is used as other wise there is a lot of conversions, its better to expose the API as u32.
-	len: i32,
+	/// Insert position in the document
+	ins: InsertPos,
+	/// Length of the operation (positive for insert, negative for delete)
+	len: Length,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct OpList {
-	ops: Vec<Op>, // <- Consider using arrayvec / tinyvec / smallvec if there is a huge amount of array creation / deletion.
-	test_op: Option<Vec<(i32, i32)>>, // For testing, to be removed
+	/// List of operations to be applied
+	ops: Vec<Op>,
+	/// Test data for debugging (should be removed in production)
+	test_op: Option<Vec<(InsertPos, Length)>>,
 }
 
 // set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe" 
 // https://github.com/nico-abram/blondie
 
-fn getOpList<const N: usize>(list: [(i32, i32); N]) -> OpList {
+/// Creates an OpList from a fixed-size array of operations
+fn getOpList<const N: usize>(list: [(InsertPos, Length); N]) -> OpList {
 	OpList {
 		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
 		test_op: None
 	}
 }
 
-/// Same as getOpList, just takes Vec as input
-fn getOpListbyVec(list: Vec<(i32, i32)>) -> OpList {
+/// Creates an OpList from a Vec of operations
+fn getOpListbyVec(list: Vec<(InsertPos, Length)>) -> OpList {
 	OpList {
 		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
 		test_op: None
 	}
 }
 
-/// Same as getOpList, just for testing converts the test_op as already existing range list
-fn getOpListforTesting<const N: usize, const M: usize>(pre_existing_range_list: [(i32, i32); N], oplist: [(i32, i32); M]) -> OpList {
+/// Creates an OpList for testing with pre-existing range list
+fn getOpListforTesting<const N: usize, const M: usize>(
+	pre_existing_range_list: [(InsertPos, Length); N], 
+	oplist: [(InsertPos, Length); M]
+) -> OpList {
 	OpList {
 		ops: oplist.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
 		test_op: Some(pre_existing_range_list.into_iter().map(|(ins, len)| (ins, len) ).collect())
@@ -50,464 +57,480 @@ fn getOpListforTesting<const N: usize, const M: usize>(pre_existing_range_list: 
 }
 
 impl OpList {
-	/// Returns a new OpList with discontinues ranges, i.g. at ins x, extends the ins x till it's corrospoding length, assume an infinite length crdt edit, ins with its length will tell where such extending should take place.
+	/// Helper function to initialize the new OpList with the first operation
+	fn initialize_new_oplist(&self) -> (OpList, usize) {
+		// Create empty OpList to be populated
+		let mut new_oplist = OpList { ops: Vec::new(), test_op: None };
+		
+		// Determine starting index based on three conditions
+		let start_index = if let Some(test_data) = &self.test_op {
+			// Condition 1: Use test data if available
+			new_oplist = getOpListbyVec(test_data.clone());
+			0 // Start from beginning since we're using all test data
+		} else if self.ops.is_empty() {
+			// Condition 2: No operations to process
+			0 // Start from beginning with empty list
+		} else {
+			// Condition 3: Process first operation normally
+			let first_op = self.ops[0];
+			let initial_op = if first_op.len.is_negative() {
+				// For delete operations: normalize position by adding length
+				// Example: ins=5, len=-2 becomes ins=3, len=-2
+				Op { 
+					ins: first_op.ins + first_op.len, 
+					len: first_op.len 
+				}
+			} else {
+				// For insert operations: keep original position
+				Op { 
+					ins: first_op.ins, 
+					len: first_op.len 
+				}
+			};
+			new_oplist.ops.push(initial_op);
+			1 // Start from second operation since first is processed
+		};
+		(new_oplist, start_index)
+	}
+
+	/// Helper function to normalize delete operation position
+	fn normalize_delete_op(op: &Op) -> Op {
+		if op.len.is_negative() {
+			Op { 
+				ins: op.ins + op.len, 
+				len: op.len 
+			}
+		} else {
+			*op
+		}
+	}
+
+	/// Helper function to check if an operation is within a range
+	fn is_op_in_range(op_ins: InsertPos, start_range: InsertPos, end_range: InsertPos) -> bool {
+		op_ins >= start_range && op_ins <= end_range
+	}
+
+	/// Helper function to remove zero-length ranges
+	/// More efficient than removing one by one as it uses retain
+	fn remove_zero_length_ranges(ops: &mut Vec<Op>, start_index: usize) {
+		if start_index >= ops.len() {
+			return;
+		}
+		
+		// Split the vector and only process the part from start_index
+		let mut temp_ops = ops.split_off(start_index);
+		temp_ops.retain(|op| op.len != 0);
+		ops.append(&mut temp_ops);
+	}
+
+	/// Returns a new OpList with discontinues ranges, i.g. at ins x, extends the ins x till it's corrospoding length, 
+	/// assume an infinite length crdt edit, ins with its length will tell where such extending should take place.
 	/// This also assumes that the OpList is sequential according to the time dag.
 	/// 
 	/// [0, inf) <- ins 1 len 100, ins 2 len 12, ins 101 len 1.
 	fn from_oplist_to_sequential_list(&self) -> OpList {
-		// Use test data if provided for the range_list (i.g. new_oplist)
-		let mut new_oplist: OpList = OpList { ops: vec![], test_op: None };
-		let mut start_from_for_ops: usize = 0;
-		if self.test_op.is_some() {
-			new_oplist = getOpListbyVec(self.test_op.clone().unwrap());
-		} else {
-			if self.ops[0].len.is_negative() {
-				new_oplist = OpList { ops: vec![
-					Op { ins: self.ops[0].ins + self.ops[0].len, len: self.ops[0].len },
-				],test_op: None }; // Start with the first element in the list with the length to be zero
-			} else {
-				new_oplist = OpList { ops: vec![
-					Op { ins: self.ops[0].ins, len: self.ops[0].len },
-				],test_op: None }; // Start with the first element in the list with the length to be zero
-			}
-			start_from_for_ops = 1;
-			// let mut new_oplist = getOpList([(1,1),(2,1),(4,-1),(5,1)]);
-			// let mut new_oplist = getOpList([(5,-2),(6,1),(7,1)]);
-		}
+		// Initialize the new OpList
+		let (mut new_oplist, start_from_for_ops) = self.initialize_new_oplist();
 
-		// let mut test_vec: OpList = getOpList([(1, 1), (3, 1), (1, 1), (5, 1)]);
-		// let expected_result = getOpList([(1, 2), (2, 1), (3, 1)]);
+		// Process each operation
 		for op in self.ops[start_from_for_ops..].iter() {
-			// Current Iins
-			let mut op_ins = op.ins;
-			let mut op_len = op.len;
+			// Normalize delete operation position
+			let normalized_op = Self::normalize_delete_op(op);
+			let mut op_ins = normalized_op.ins;
+			let mut op_len = normalized_op.len;
 
-			if op_len.is_negative() {
-				op_ins = op_ins + op_len; // convert 5,-2 to 3,-2 for comparing ins with start and end range
-			}
-
-			let mut aggerate_len: i32 = 0;
-
+			// State tracking variables
+			let mut aggregate_len: Length = 0;
 			let mut range_insertion_index: usize = usize::MAX;
 			let mut range_delete_index: usize = usize::MAX;
-
-			let mut start_range: i32;
-			let mut end_range: i32 = i32::MAX;
-
+			let mut start_range: InsertPos;
+			let mut end_range: InsertPos = i32::MAX;
+			
+			// Operation tracking
 			let mut new_range = Op { ins: i32::MAX, len: i32::MAX };
-			let mut orignal_doc_delete_range = Op { ins: i32::MAX, len: 0 }; // basically this delete keeps track of original document deletes which are being extended.
-			let mut orignal_doc_delete_range = Op { ins: i32::MAX, len: i32::MAX }; // basically this delete keeps track of original document deletes which are being extended.
-			// deletes are stored basically as start,len where len is not negative
+			let mut original_doc_delete_range = Op { ins: i32::MAX, len: i32::MAX };
 			let mut last_op_to_be_delete = false;
-			// start finding 0 len ranges and delete them from the list from this point to the end of the list.
 			let mut to_delete_zero_ranges_from = usize::MAX;
 
-			// required for fixing elements which are already deleted in the orignal and are extended.
-			let mut previous_delete_range_start: i32 = i32::MAX;
-			let mut previous_delete_range_end: i32 = i32::MAX;
-
-			let mut last_delete_range_start: i32 = i32::MAX;
-			let mut last_delete_range_end: i32 = i32::MAX;
+			// Delete range tracking
+			let mut previous_delete_range_start: InsertPos = i32::MAX;
+			let mut previous_delete_range_end: InsertPos = i32::MAX;
+			let mut last_delete_range_start: InsertPos = i32::MAX;
+			let mut last_delete_range_end: InsertPos = i32::MAX;
 			let mut last_delete_range_index: usize = usize::MAX;
 
-			let mut range_len:i32 = i32::MAX;
 			let ops_len = new_oplist.ops.len();
+			// Process each range in the current new_oplist
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
 				dbg!(op_ins);
 				dbg!(op_len);
 				last_op_to_be_delete = false;
-				if range.len.is_negative() { // if we itering a negative range, we just want to check for splitting 
-
-					// range_len = range.len;
-					// This block is basically checking for split insertions just before a negative range.
-					// it can't really extend, more like insert in between or extend the delete.
-
-
-					// 7,-2 -> 7,9
+				
+				// Handle negative ranges (deletes)
+				if range.len.is_negative() {
+					// This block handles split insertions before a negative range
 					previous_delete_range_start = range.ins;
 					previous_delete_range_end = previous_delete_range_start + (-range.len);
 
-
-					if end_range != i32::MAX {
-						start_range = end_range; // previous end range, we need this as we need previous op.ins to find ending.
-					} else { start_range = 0 }
-					if (range.ins as i32 + aggerate_len) > 0 { // When is this not true? Delete start + agg_len > 0 means that delete range is going back.
-						end_range = range.ins as i32 + aggerate_len; // so for (4,-1) we are considering 4 as the end, i.g. agg_len + 4.
+					// Calculate range boundaries
+					start_range = if end_range != i32::MAX {
+						end_range // previous end range
 					} else {
-						panic!("Deletes should delete into the negative range, e.g. (4,-5) shouldn't exists.");
-						// end_range = range.ins 
+						0
+					};
+					
+					// Validate delete range
+					if (range.ins as Length + aggregate_len) > 0 {
+						end_range = range.ins as Length + aggregate_len;
+					} else {
+						panic!("Deletes should delete into the negative range, e.g. (4,-5) shouldn't exist.");
 					}
+					
 					dbg!(start_range);
 					dbg!(end_range);
 
-					// op_ins, start_range, etc are trasformed to represent current document start and end and not original document.
-					// there of those - aggerate_len simply gives trasformed document based on the original document
-					if op_ins >= start_range && op_ins <= end_range { // Split new insertion in the sequential list.
+					// Check if operation is within current range
+					if Self::is_op_in_range(op_ins, start_range, end_range) {
 						if op_len.is_positive() {
+							// Insert operation within range
 							new_range = Op {
-								ins: op_ins - aggerate_len,
+								ins: op_ins - aggregate_len,
 								len: op_len
 							};
-							range_insertion_index = i; // If we are inserting within a deleted range, we would want the insert to go after the delete; nah its afterwords would be handled ahead
+							range_insertion_index = i;
 							break;	
 						} else {
-							if op_ins - op_len > end_range && (op_ins != end_range) { // delete extends beyond end of range, therefor we continue to find deletes.
-								if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-									orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-									orignal_doc_delete_range.len = end_range - aggerate_len - orignal_doc_delete_range.ins; // end range - delete start
+							// Delete operation within range
+							if op_ins - op_len > end_range && (op_ins != end_range) {
+								// Delete extends beyond end of range
+								if original_doc_delete_range.ins == i32::MAX {
+									original_doc_delete_range.ins = op_ins - aggregate_len;
+									original_doc_delete_range.len = end_range - aggregate_len - original_doc_delete_range.ins;
 									range_delete_index = i;
 
-									// As delete is extending beyond another delete, we add that delete on this list and queue the delete range to be deleted.
-									orignal_doc_delete_range.len -= range.len;
-									aggerate_len += range.len;
+									original_doc_delete_range.len -= range.len;
+									aggregate_len += range.len;
 									range.len = 0;
 									if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 										to_delete_zero_ranges_from = i;
 									}
 									
-									op_len = op_ins - op_len - (end_range); // delete end - end range
-									op_ins = end_range; // end range
+									op_len = op_ins - op_len - end_range;
+									op_ins = end_range;
 									op_len = -op_len;
 									last_op_to_be_delete = true;
-									dbg!(orignal_doc_delete_range);
+									dbg!(original_doc_delete_range);
 									dbg!(op_ins);
 									dbg!(op_len);
-								} else { // If delete_range already exists
-									orignal_doc_delete_range.len += (end_range - aggerate_len) - (op_ins - aggerate_len); // end range - delete start
-									op_len = op_ins - op_len - (end_range); // delete end - end range
+								} else {
+									original_doc_delete_range.len += (end_range - aggregate_len) - (op_ins - aggregate_len);
+									op_len = op_ins - op_len - end_range;
 									op_ins = end_range;
 									op_len = -op_len;
 									last_op_to_be_delete = true;
 								}
-							} else if op_ins != end_range { // delete doesn't extends beyond end of range
-								if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-									orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-									orignal_doc_delete_range.len = (op_ins - op_len - aggerate_len) - (op_ins - aggerate_len); // delete end - delete start
+							} else if op_ins != end_range {
+								// Delete doesn't extend beyond end of range
+								if original_doc_delete_range.ins == i32::MAX {
+									original_doc_delete_range.ins = op_ins - aggregate_len;
+									original_doc_delete_range.len = (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 									range_delete_index = i;
 									break;	
 								} else {
-									orignal_doc_delete_range.len += (op_ins - op_len - aggerate_len) - (op_ins - aggerate_len); // delete end - delete start
+									original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 									break;	
 								}
 							} else if i == ops_len - 1 {
+								// Last element handling
 								if op_len.is_positive() {
 									new_range = Op {
-										ins: op_ins - aggerate_len - range.len, // basically if we are inserting after the range, we would also want the range len included in aggerate len
+										ins: op_ins - aggregate_len - range.len,
 										len: op_len
 									};
-									range_insertion_index = i+1; // Just insert after the last range
-								} else { // basically it cannot further extend so we are using the case of it doesn't extend beyond end of range
-		
-									// start from here, the problem is that we are deleting, so we need to take this as last messure.
-		
-									// ok ok lets start from after the test we just don't have much time.
-								
-									if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-										orignal_doc_delete_range.ins = op_ins - range.len - aggerate_len; // delete start
-										orignal_doc_delete_range.len = (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
-										range_delete_index = i+1;
+									range_insertion_index = i + 1;
+								} else {
+									if original_doc_delete_range.ins == i32::MAX {
+										original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
+										original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
+										range_delete_index = i + 1;
 									} else {
-										orignal_doc_delete_range.len += (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
+										original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
 									}
 								}
 							}
 						}
-					} else if i == ops_len - 1 { // if op_ins > start_range && op_ins < end_range i.g. op is after the range
+					} else if i == ops_len - 1 {
+						// Operation is after the range
 						if op_len.is_positive() {
 							new_range = Op {
-								ins: op_ins - aggerate_len - range.len, // basically if we are inserting after the range, we would also want the range len included in aggerate len
+								ins: op_ins - aggregate_len - range.len,
 								len: op_len
 							};
-							range_insertion_index = i+1; // Just insert after the last range
-						} else { // basically it cannot further extend so we are using the case of it doesn't extend beyond end of range
-
-							// start from here, the problem is that we are deleting, so we need to take this as last messure.
-
-							// ok ok lets start from after the test we just don't have much time.
-						
-							if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-								orignal_doc_delete_range.ins = op_ins - range.len - aggerate_len; // delete start
-								orignal_doc_delete_range.len = (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
-								range_delete_index = i+1;
+							range_insertion_index = i + 1;
+						} else {
+							if original_doc_delete_range.ins == i32::MAX {
+								original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
+								original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
+								range_delete_index = i + 1;
 							} else {
-								orignal_doc_delete_range.len += (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
+								original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
 							}
 						}
 					}
 
-					// 7,-2 -> 7,9
+					// Update delete range tracking
 					last_delete_range_start = range.ins;
 					last_delete_range_end = last_delete_range_start + (-range.len);
 					last_delete_range_index = i;
-					aggerate_len += range.len;
+					aggregate_len += range.len;
 					continue;
 				}
 
-				// Insertions which extend deleted elements, i.g. [0,inf) is extended by (1,1) and (2,1) but [1,2] is deleted on the original list.
-				// if range.ins > /* Not >= as it would always be more */ previous_delete_range_ins && range.ins <= (previous_delete_range_ins + (-previous_delete_range_len as u32)) {
+				// Handle positive ranges (insertions)
+				// Insertions which extend deleted elements
 				if range.ins > previous_delete_range_start && range.ins <= previous_delete_range_end {
+					// This block changes start positions of ranges whose original length has been deleted
+					start_range = previous_delete_range_start + (previous_delete_range_end - previous_delete_range_start) + aggregate_len;
+				} else {
+					start_range = range.ins + aggregate_len;
+				}
+				end_range = start_range + range.len;
 
-					// This block basically changes start positions of ranges whose original length has been deleted.
-					
-					// 7,-2 -> 7 + 2 + (agg_len-2)
-					// [(5,-2),(6,len),(7,len)]
-					start_range = previous_delete_range_start + (previous_delete_range_end - previous_delete_range_start) + aggerate_len;
-				} else { start_range = range.ins + aggerate_len; } // considering it as postive for positive ranges for now
-				end_range = start_range + range.len; // considering it as postive for positive ranges for now
-
-				// Possibly could proof check here?
 				dbg!(start_range);
 				dbg!(end_range);
 				
-				if op_ins >= start_range && op_ins <= end_range { // Adds to the range in the sequential list.
-					// TODO: This is changed, may be wrong test it out.
+				// Check if operation is within current range
+				if Self::is_op_in_range(op_ins, start_range, end_range) {
 					if op_len.is_positive() {
+						// Add to existing range
 						range.len += op_len;
 						range_insertion_index = usize::MAX;
 						break;
 					} else {
-						// op_ins == end_range checks for extending, we don't want to extend deletes but we want to extend inserts
-						if op_ins - op_len - aggerate_len > (end_range - aggerate_len) && (op_ins != end_range) { // delete extends beyond end of range, therefor we continue to find deletes.
-							range.len -= (end_range - aggerate_len) - (op_ins - aggerate_len); // end range - delete start
+						// Delete operation within range
+						if op_ins - op_len - aggregate_len > (end_range - aggregate_len) && (op_ins != end_range) {
+							// Delete extends beyond end of range
+							range.len -= (end_range - aggregate_len) - (op_ins - aggregate_len);
 							if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 								to_delete_zero_ranges_from = i;
 							}
 
-							// the only case we change range.len -= and continue, which effects agg len.
-							aggerate_len += (end_range - aggerate_len) - (op_ins - aggerate_len);
+							aggregate_len += (end_range - aggregate_len) - (op_ins - aggregate_len);
 
-							// if range.len == 0 { todo!() } // Remove range if the whole range is deleted.
-							dbg!(op_ins );
+							dbg!(op_ins);
 							dbg!(op_ins - op_len);
 							dbg!(range.clone());
 
-							// as start/end ranges are compared direcly we don't want to base op_ins/len based on agg len.
-							op_len = op_ins - op_len - (end_range); // delete end - end range
-							op_ins = (end_range); // end range
+							op_len = op_ins - op_len - end_range;
+							op_ins = end_range;
 							op_len = -op_len;
 							last_op_to_be_delete = true;
-
-							// delete range doesn't get effect as we are just deleting the insert range
-						} else if op_ins != end_range { // delete doesn't extends beyond end of range
-							range.len -= op_ins - op_len - aggerate_len - (op_ins - aggerate_len); // delete end - delete start
+						} else if op_ins != end_range {
+							// Delete doesn't extend beyond end of range
+							range.len -= op_ins - op_len - aggregate_len - (op_ins - aggregate_len);
 							if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 								to_delete_zero_ranges_from = i;
 							}
 							dbg!(range.clone());
-							// delete range doesn't get effect as we are just deleting the insert range
 							range_insertion_index = usize::MAX;
 							break;
-						} else if i == ops_len-1 {
-							// basically in the case op_ins == end_range we want to continue and check for other ifs.
-							// really just checking for the last element.
-							if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-								orignal_doc_delete_range.ins = op_ins - range.len - aggerate_len; // delete start
-								orignal_doc_delete_range.len = (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end
-								range_delete_index = i+1;
+						} else if i == ops_len - 1 {
+							// Last element handling
+							if original_doc_delete_range.ins == i32::MAX {
+								original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
+								original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
+								range_delete_index = i + 1;
 							} else {
-								orignal_doc_delete_range.len += (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
+								original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
 							}
 						}
 					}
-				// } else if op_ins < start_range { // Split new insertion in the sequential list.
-				} else if op_ins < start_range { // Split new insertion in the sequential list.
-					
-					// if instead of else if because of (op_ins != end_range) from before.
-
-					// This shouldn't be possible within original length deleted elements as we can't be before the start range as we manually iter throught it before.
-					// [(5,-2),(6,len),(7,len)] as we check first 0 to 3 then 6s and 7s length.
+				} else if op_ins < start_range {
+					// Split new insertion before the range
 					if op_len.is_positive() {
 						new_range = Op {
-							ins: op_ins - aggerate_len,
+							ins: op_ins - aggregate_len,
 							len: op_len
 						};
 						range_insertion_index = i;
 						break;
 					} else {
-						if op_ins - op_len - aggerate_len > (start_range - aggerate_len) && op_ins - op_len - aggerate_len <= (end_range - aggerate_len) { // delete extends beyond start range and below end range.
-							if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-								orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-								orignal_doc_delete_range.len = (start_range - aggerate_len) - orignal_doc_delete_range.ins; // start range - delete start
+						// Delete operation before range
+						if op_ins - op_len - aggregate_len > (start_range - aggregate_len) && 
+						   op_ins - op_len - aggregate_len <= (end_range - aggregate_len) {
+							// Delete extends beyond start range and below end range
+							if original_doc_delete_range.ins == i32::MAX {
+								original_doc_delete_range.ins = op_ins - aggregate_len;
+								original_doc_delete_range.len = (start_range - aggregate_len) - original_doc_delete_range.ins;
 								
-								range.len -= (op_ins - op_len - aggerate_len) - (start_range - aggerate_len); // delete end - start range
+								range.len -= (op_ins - op_len - aggregate_len) - (start_range - aggregate_len);
 								if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 									to_delete_zero_ranges_from = i;
 								}
-								range_delete_index = i; // end of delete.
+								range_delete_index = i;
 								dbg!(range.clone());
 								break;	
-							} else { // If delete_range already exists
-								orignal_doc_delete_range.len += (start_range - aggerate_len) - (op_ins - aggerate_len); // start range - delete start
-								range.len -= (op_ins - op_len - aggerate_len) - (start_range - aggerate_len); // delete end - start range
+							} else {
+								original_doc_delete_range.len += (start_range - aggregate_len) - (op_ins - aggregate_len);
+								range.len -= (op_ins - op_len - aggregate_len) - (start_range - aggregate_len);
 								if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 									to_delete_zero_ranges_from = i;
 								}
 								dbg!(range.clone());
 								break;	
 							}
-						} else if op_ins - op_len - aggerate_len > end_range - aggerate_len { // delete extends beyond end of range, therefore we continue to find deletes.
-							if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-								orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-								orignal_doc_delete_range.len = (start_range - aggerate_len) - orignal_doc_delete_range.ins; // start range - delete start
+						} else if op_ins - op_len - aggregate_len > end_range - aggregate_len {
+							// Delete extends beyond end of range
+							if original_doc_delete_range.ins == i32::MAX {
+								original_doc_delete_range.ins = op_ins - aggregate_len;
+								original_doc_delete_range.len = (start_range - aggregate_len) - original_doc_delete_range.ins;
 								range_delete_index = i;
 								
-								range.len = 0; // Basically we have whole range to delete 
+								range.len = 0;
 								if to_delete_zero_ranges_from == usize::MAX {
 									to_delete_zero_ranges_from = i;
 								}
-								op_len = op_ins - op_len - (end_range); // delete end - end range
-								op_ins = (end_range); // end range
+								op_len = op_ins - op_len - end_range;
+								op_ins = end_range;
 								op_len = -op_len;
 								last_op_to_be_delete = true;
 								dbg!(op_ins);
 								dbg!(op_len);
-							} else { // If delete_range already exists
-								orignal_doc_delete_range.len += (start_range - aggerate_len) - (op_ins - aggerate_len); // start range - delete start
+							} else {
+								original_doc_delete_range.len += (start_range - aggregate_len) - (op_ins - aggregate_len);
 								
-								range.len = 0; // Basically we have whole range to delete 
+								range.len = 0;
 								if to_delete_zero_ranges_from == usize::MAX {
 									to_delete_zero_ranges_from = i;
 								}
 
-								op_len = op_ins - op_len - (end_range); // delete end - end range
-								op_ins = (end_range); // end range
+								op_len = op_ins - op_len - end_range;
+								op_ins = end_range;
 								op_len = -op_len;
 								last_op_to_be_delete = true;
 								dbg!(op_ins);
 								dbg!(op_len);
-								// Wait ins't this incorrect, don't we need to change the len to be negative?
 							}
-						} else { // delete ends before start of range
-							if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-								orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-								orignal_doc_delete_range.len = (op_ins - op_len - aggerate_len) - (op_ins - aggerate_len); // delete end - delete start
-								dbg!(orignal_doc_delete_range.clone());
+						} else {
+							// Delete ends before start of range
+							if original_doc_delete_range.ins == i32::MAX {
+								original_doc_delete_range.ins = op_ins - aggregate_len;
+								original_doc_delete_range.len = (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
+								dbg!(original_doc_delete_range.clone());
 								
-								range_delete_index = i; // end of delete.
+								range_delete_index = i;
 								break;	
-							} else { // If delete_range already exists
-								orignal_doc_delete_range.len += (op_ins - op_len - aggerate_len) - op_ins - aggerate_len; // delete end - delete start
-								dbg!(orignal_doc_delete_range.clone());
+							} else {
+								original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - op_ins - aggregate_len;
+								dbg!(original_doc_delete_range.clone());
 								
 								break;
 							}
 						}	
 					}
-				} else if i == ops_len-1  { // if op_ins > start_range && op_ins < end_range i.g. OP is after the range
+				} else if i == ops_len - 1 {
+					// Operation is after the range
 					if op_len.is_positive() {
 						new_range = Op {
-							ins: op_ins - aggerate_len - range.len, // basically if we are inserting after the range, we would also want the range len included in aggerate len
+							ins: op_ins - aggregate_len - range.len,
 							len: op_len
 						};
-						range_insertion_index = i+1; // Just insert after the last range
+						range_insertion_index = i + 1;
 					} else {
-						if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
+						if original_doc_delete_range.ins == i32::MAX {
 							dbg!("hello 1");
 							dbg!(start_range);
 							dbg!(end_range);
-							dbg!(op_ins - range.len - aggerate_len);
-							dbg!((op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len));
+							dbg!(op_ins - range.len - aggregate_len);
+							dbg!((op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len));
 							dbg!(-op_len);
-							orignal_doc_delete_range.ins = op_ins - range.len - aggerate_len; // delete start
-							orignal_doc_delete_range.len = (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end
-							range_delete_index = i+1;
+							original_doc_delete_range.ins = op_ins - range.len - aggregate_len;
+							original_doc_delete_range.len = (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
+							range_delete_index = i + 1;
 						} else {
-							orignal_doc_delete_range.len += (op_ins - op_len - range.len - aggerate_len) - (op_ins - range.len - aggerate_len); // delete end - delete start
+							original_doc_delete_range.len += (op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len);
 						}
 					}
 				}
 
-				aggerate_len += range.len; // range_len is basically effected and therefore future elements for the iter.
+				aggregate_len += range.len;
 			} 
 
-			// in the case of a extending delete but no more iter, this only happens for deletes and at the end.
-			if last_op_to_be_delete == true {
-				if orignal_doc_delete_range.ins == i32::MAX { // If delete_range doesn't already exists
-					orignal_doc_delete_range.ins = op_ins - aggerate_len; // delete start
-					orignal_doc_delete_range.len = (op_ins - op_len - aggerate_len) - (op_ins - aggerate_len); // delete end
-					range_delete_index = (new_oplist.ops.len()-1)+1;
+			// Handle extending delete with no more iterations
+			if last_op_to_be_delete {
+				if original_doc_delete_range.ins == i32::MAX {
+					original_doc_delete_range.ins = op_ins - aggregate_len;
+					original_doc_delete_range.len = (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
+					range_delete_index = new_oplist.ops.len();
 				} else {
-					orignal_doc_delete_range.len += (op_ins - op_len  - aggerate_len) - (op_ins  - aggerate_len); // delete end - delete start
+					original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 				}
 			}
 
-
+			// Insert new range if needed
 			if range_insertion_index != usize::MAX {
-				assert!(new_range != Op { ins: i32::MAX, len: i32::MAX }); // this is more or less a placeholder.
-				new_oplist.ops.insert(range_insertion_index as usize, new_range)
+				debug_assert!(new_range != Op { ins: i32::MAX, len: i32::MAX });
+				new_oplist.ops.insert(range_insertion_index, new_range);
 			}
-			if range_delete_index != usize::MAX { // The reason we can't do this is because in some cases we are deleting futher ranges which doesn't explicialy state.
-				assert!(orignal_doc_delete_range != Op { ins: i32::MAX, len: i32::MAX }); // this is more or less a placeholder.
+
+			// Handle delete range insertion
+			if range_delete_index != usize::MAX {
+				debug_assert!(original_doc_delete_range != Op { ins: i32::MAX, len: i32::MAX });
 				dbg!(last_delete_range_start);
 				dbg!(last_delete_range_end);
 				dbg!(previous_delete_range_start);
 				dbg!(previous_delete_range_end);
 				dbg!(range_delete_index);
-				if last_delete_range_end == orignal_doc_delete_range.ins {
-					// if delete is extending a previous delete
-					new_oplist.ops[last_delete_range_index].len -= orignal_doc_delete_range.len;
-
+				
+				if last_delete_range_end == original_doc_delete_range.ins {
+					// Delete is extending a previous delete
+					new_oplist.ops[last_delete_range_index].len -= original_doc_delete_range.len;
 
 					if range_delete_index < new_oplist.ops.len() {
-						if (new_oplist.ops[range_delete_index].len.is_negative()) && (new_oplist.ops[range_delete_index].ins == orignal_doc_delete_range.ins + orignal_doc_delete_range.len) {
+						if new_oplist.ops[range_delete_index].len.is_negative() && 
+						   new_oplist.ops[range_delete_index].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
 							new_oplist.ops[last_delete_range_index].len += new_oplist.ops[range_delete_index].len;
 							new_oplist.ops.remove(range_delete_index);
 						}
-					} else if range_delete_index+1 < new_oplist.ops.len() {				
-						if (new_oplist.ops[range_delete_index+1].len.is_negative()) && (new_oplist.ops[range_delete_index+1].ins == orignal_doc_delete_range.ins + orignal_doc_delete_range.len) {
-							new_oplist.ops[last_delete_range_index].len += new_oplist.ops[range_delete_index+1].len;
-							new_oplist.ops.remove(range_delete_index+1);
+					} else if range_delete_index + 1 < new_oplist.ops.len() {
+						if new_oplist.ops[range_delete_index + 1].len.is_negative() && 
+						   new_oplist.ops[range_delete_index + 1].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
+							new_oplist.ops[last_delete_range_index].len += new_oplist.ops[range_delete_index + 1].len;
+							new_oplist.ops.remove(range_delete_index + 1);
 						}
 					}
-				}
-				// if delete is extending towards the right.
-				else if range_delete_index < new_oplist.ops.len() {
-					if (new_oplist.ops[range_delete_index].len.is_negative()) && (new_oplist.ops[range_delete_index].ins == orignal_doc_delete_range.ins + orignal_doc_delete_range.len) {
-						new_oplist.ops[range_delete_index].ins -= orignal_doc_delete_range.len;
-						new_oplist.ops[range_delete_index].len -= orignal_doc_delete_range.len;
-					} else if range_delete_index+1 < new_oplist.ops.len() {
-						// in the case of 7,1;7,-1 then do this.
-						
-						if (new_oplist.ops[range_delete_index+1].len.is_negative()) && (new_oplist.ops[range_delete_index+1].ins == orignal_doc_delete_range.ins + orignal_doc_delete_range.len) {
-							
-							new_oplist.ops[range_delete_index+1].ins -= orignal_doc_delete_range.len;
-							new_oplist.ops[range_delete_index+1].len -= orignal_doc_delete_range.len;
+				} else if range_delete_index < new_oplist.ops.len() {
+					if new_oplist.ops[range_delete_index].len.is_negative() && 
+					   new_oplist.ops[range_delete_index].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
+						new_oplist.ops[range_delete_index].ins -= original_doc_delete_range.len;
+						new_oplist.ops[range_delete_index].len -= original_doc_delete_range.len;
+					} else if range_delete_index + 1 < new_oplist.ops.len() {
+						if new_oplist.ops[range_delete_index + 1].len.is_negative() && 
+						   new_oplist.ops[range_delete_index + 1].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
+							new_oplist.ops[range_delete_index + 1].ins -= original_doc_delete_range.len;
+							new_oplist.ops[range_delete_index + 1].len -= original_doc_delete_range.len;
 						} else {
-							// lastly in case we need to split the list and insert the element into place.
-		
-							orignal_doc_delete_range.len *= -1;
-							new_oplist.ops.insert(range_delete_index, orignal_doc_delete_range);
+							original_doc_delete_range.len *= -1;
+							new_oplist.ops.insert(range_delete_index, original_doc_delete_range);
 						}
 					} else {
-						// lastly in case we need to split the list and insert the element into place.
-	
-						orignal_doc_delete_range.len *= -1;
-						new_oplist.ops.insert(range_delete_index, orignal_doc_delete_range);
-					} 
+						original_doc_delete_range.len *= -1;
+						new_oplist.ops.insert(range_delete_index, original_doc_delete_range);
+					}
 				} else {
-					// lastly in case we need to split the list and insert the element into place.
-
-					orignal_doc_delete_range.len *= -1;
-					new_oplist.ops.insert(range_delete_index, orignal_doc_delete_range);
+					original_doc_delete_range.len *= -1;
+					new_oplist.ops.insert(range_delete_index, original_doc_delete_range);
 				}
-				dbg!(orignal_doc_delete_range);
-				// new_oplist.ops.insert(range_insertion_index as usize, new_range)
+				dbg!(original_doc_delete_range);
 			}
 
-			// remove zero length ranges, this has to be done at the end, and removes always takes place afterwords.
+			// Remove zero-length ranges
 			if to_delete_zero_ranges_from != usize::MAX {
-				let mut i = to_delete_zero_ranges_from;
-				while i < new_oplist.ops.len() {
-					if new_oplist.ops[i].len == 0 {
-						new_oplist.ops.remove(i);
-					} else {
-						i+=1;
-					}
-				}
+				Self::remove_zero_length_ranges(&mut new_oplist.ops, to_delete_zero_ranges_from);
 			}
 		}
 
-		return new_oplist;
+		new_oplist
 	}
 
 	/// Convert sequential_list into a oplist
@@ -520,45 +543,80 @@ impl OpList {
 
 	/// Changes delete ranges such as 2,-1 to 1,2 to 1,-2.
 	/// Should only be used for reading output for testing.
-	fn clearn_delete(&mut self) {
+	fn clean_delete(&mut self) {
 		for op in self.ops.iter_mut() {
 			if op.len < 0 {
 				let ins = op.ins;
-				op.ins = (op.ins as i32 + op.len);
-				op.len = -(ins as i32);
+				op.ins = op.ins + op.len;
+				op.len = -ins;
 			}
 		}
 	}
 	
 	/// Human readable output for testing.
-	fn clearn_output(&mut self) {
+	fn clean_output(&mut self) {
 		todo!(); // maybe not worthwhile
 	}
 }
 
+/// Enumeration for control flow in loops
+#[derive(Debug, PartialEq)]
 enum BreakOrContinue {
     Break,
     Continue,
 }
 
-/// Generating random test data for testing, but is not implemented correctly yet, spicifically includsive range is random. 
+/// Configuration for random test data generation
+#[derive(Debug)]
+struct TestDataConfig {
+    pub num_tests: usize,
+    pub min_insert_pos: InsertPos,
+    pub max_insert_pos: InsertPos,
+    pub min_length: Length,
+    pub max_length: Length,
+}
+
+impl Default for TestDataConfig {
+    fn default() -> Self {
+        Self {
+            num_tests: 10,
+            min_insert_pos: 1,
+            max_insert_pos: 10,
+            min_length: -5,
+            max_length: 5,
+        }
+    }
+}
+
+/// Generates random test data for testing operations
+/// Note: This is not implemented correctly yet, specifically inclusive range is random.
 /// This is very poorly optimized but shouldn't matter for testing.
 fn generate_random_test_data(num_tests: usize) -> OpList {
-	let mut test_data = Vec::with_capacity(num_tests);
+	generate_random_test_data_with_config(TestDataConfig {
+		num_tests,
+		..Default::default()
+	})
+}
+
+/// Generates random test data with custom configuration
+fn generate_random_test_data_with_config(config: TestDataConfig) -> OpList {
+	let mut test_data = Vec::with_capacity(config.num_tests);
 	let mut rng = thread_rng();
 
-	let mut i: i32 = 0;
-	while i != num_tests as i32{
-		let ins: i32 = rng.gen_range(1..=10); // Generate a random insertion position
-		let len: i32 = rng.gen_range(-5..=5); // Generate a random length
-		if len == 0 || (len + (ins as i32)) < 0 { i-1; continue; } // Do not include 0 len! Do not delete over a negative range!
+	for _ in 0..config.num_tests {
+		let ins: InsertPos = rng.gen_range(config.min_insert_pos..=config.max_insert_pos);
+		let len: Length = rng.gen_range(config.min_length..=config.max_length);
+		
+		// Skip invalid operations
+		if len == 0 || (len + ins) < 0 {
+			continue;
+		}
+		
 		test_data.push(Op { ins, len });
-		i += 1;
 	}
 
 	OpList { ops: test_data, test_op: None }
 }
-
 
 /// Old code: generating only positive random test data for testing. 
 fn generate_only_positive_random_test_data(num_tests: usize) -> OpList {
@@ -566,8 +624,8 @@ fn generate_only_positive_random_test_data(num_tests: usize) -> OpList {
 	let mut rng = thread_rng();
 
 	for _ in 0..num_tests {
-		let ins = rng.gen_range(1..=10); // Generate a random insertion position
-		let len = rng.gen_range(1..=10); // Generate a random length
+		let ins = rng.gen_range(1..=10);
+		let len = rng.gen_range(1..=10);
 		test_data.push(Op { ins, len });
 	}
 
