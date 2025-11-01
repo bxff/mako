@@ -26,7 +26,8 @@ struct OpList {
 	test_op: Option<Vec<(InsertPos, Length)>>,
 }
 
-// set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe" 
+
+// set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe"
 // https://github.com/nico-abram/blondie
 
 /// Creates an OpList from a fixed-size array of operations
@@ -116,7 +117,7 @@ impl OpList {
 		if start_index >= ops.len() {
 			return;
 		}
-		
+
 		// Split the vector and only process the part from start_index
 		let mut temp_ops = ops.split_off(start_index);
 		temp_ops.retain(|op| op.len != 0);
@@ -153,36 +154,36 @@ impl OpList {
 		}
 	}
 
-	/// Returns a new OpList with discontinues ranges, i.g. at ins x, extends the ins x till it's corrospoding length, 
-	/// assume an infinite length crdt edit, ins with its length will tell where such extending should take place.
-	/// This also assumes that the OpList is sequential according to the time dag.
-	/// 
-	/// [0, inf) <- ins 1 len 100, ins 2 len 12, ins 101 len 1.
+	/// Returns a new OpList with discontinuous ranges. This transforms operations
+	/// from the current document state to be expressed in base document coordinates.
+	/// [0, ∞) <- ins 1 len 100, ins 2 len 12, ins 101 len 1.
 	fn from_oplist_to_sequential_list(&self) -> OpList {
-		// Initialize the new OpList
+		// Initialize the new OpList with existing state
 		let (mut new_oplist, start_from_for_ops) = self.initialize_new_oplist();
 
-		// Process each operation
+		// Process each operation from the starting point
 		for op in self.ops[start_from_for_ops..].iter() {
-			// Normalize delete operation position
+			// Normalize delete operation position for base coordinates
 			let normalized_op = Self::normalize_delete_op(op);
 			let mut op_ins = normalized_op.ins;
 			let mut op_len = normalized_op.len;
 
-			// State tracking variables
-			let mut aggregate_len: Length = 0;
-			let mut range_insertion_index: usize = usize::MAX;
-			let mut range_delete_index: usize = usize::MAX;
-			let mut start_range: InsertPos;
-			let mut end_range: InsertPos = i32::MAX;
-			
-			// Operation tracking
-			let mut new_range = Op { ins: i32::MAX, len: i32::MAX };
-			let mut original_doc_delete_range = Op { ins: i32::MAX, len: i32::MAX };
-			let mut last_op_to_be_delete = false;
-			let mut to_delete_zero_ranges_from = usize::MAX;
+			// === STATE TRACKING VARIABLES ===
+			// These variables track the processing state for each operation
+			let mut aggregate_len: Length = 0;              // Cumulative length adjustment from processed ranges
+			let mut range_insertion_index: usize = usize::MAX;  // Where to insert new insert operations
+			let mut range_delete_index: usize = usize::MAX;     // Where to insert new delete operations
+			let mut start_range: InsertPos;                   // Start boundary of current range in base coords
+			let mut end_range: InsertPos = i32::MAX;          // End boundary of current range in base coords
 
-			// Delete range tracking
+			// === OPERATION TRACKING ===
+			let mut new_range = Op { ins: i32::MAX, len: i32::MAX };           // New operation to insert
+			let mut original_doc_delete_range = Op { ins: i32::MAX, len: i32::MAX }; // Delete operation in base coords
+			let mut last_op_to_be_delete = false;             // Flag for incomplete delete processing
+			let mut to_delete_zero_ranges_from = usize::MAX;  // Starting index for zero-length range cleanup
+
+			// === DELETE RANGE TRACKING ===
+			// Track previous delete ranges for complex overlap scenarios
 			let mut previous_delete_range_start: InsertPos = i32::MAX;
 			let mut previous_delete_range_end: InsertPos = i32::MAX;
 			let mut last_delete_range_start: InsertPos = i32::MAX;
@@ -190,49 +191,47 @@ impl OpList {
 			let mut last_delete_range_index: usize = usize::MAX;
 
 			let new_oplist_len = new_oplist.ops.len();
-			// Process each range in the current new_oplist
+
+			// === MAIN RANGE PROCESSING LOOP ===
+			// Iterate through each existing range to determine where the new operation fits
 			for (i, range) in new_oplist.ops.iter_mut().enumerate() {
-				dbg!(op_ins);
-				dbg!(op_len);
 				last_op_to_be_delete = false;
-				
-				// Handle negative ranges (deletes)
+
+				// === HANDLE DELETE RANGES (negative length) ===
 				if range.len.is_negative() {
-					// This block handles split insertions before a negative range
+					// Track current delete range boundaries
 					previous_delete_range_start = range.ins;
 					previous_delete_range_end = previous_delete_range_start + (-range.len);
 
-					// Calculate range boundaries
+					// Calculate range boundaries in base coordinates
 					start_range = if end_range != i32::MAX {
-						end_range // previous end range
+						end_range  // Use previous end as current start
 					} else {
-						0
+						0          // Start from beginning for first range
 					};
-					
-					// Validate delete range
+
+					// Validate delete range position
 					if (range.ins as Length + aggregate_len) > 0 {
 						end_range = range.ins as Length + aggregate_len;
 					} else {
 						panic!("Deletes should delete into the negative range, e.g. (4,-5) shouldn't exist.");
 					}
-					
-					dbg!(start_range);
-					dbg!(end_range);
 
-					// Check if operation is within current range
+					// Check if current operation falls within this delete range
 					if Self::is_op_in_range(op_ins, start_range, end_range) {
 						if op_len.is_positive() {
-							// Insert operation within range
+							// === INSERT OPERATION WITHIN DELETE RANGE ===
 							new_range = Op {
-								ins: op_ins - aggregate_len,
+								ins: op_ins - aggregate_len,  // Convert to base coordinates
 								len: op_len
 							};
 							range_insertion_index = i;
-							break;	
+							break;  // Operation placed, stop processing
 						} else {
-							// Delete operation within range
+							// === DELETE OPERATION WITHIN DELETE RANGE ===
+							// Complex logic for delete-over-delete scenarios
 							if op_ins - op_len > end_range && (op_ins != end_range) {
-								// Delete extends beyond end of range
+								// Delete extends beyond current range end
 								if original_doc_delete_range.ins == i32::MAX {
 									original_doc_delete_range.ins = op_ins - aggregate_len;
 									original_doc_delete_range.len = end_range - aggregate_len - original_doc_delete_range.ins;
@@ -240,18 +239,16 @@ impl OpList {
 
 									original_doc_delete_range.len -= range.len;
 									aggregate_len += range.len;
-									range.len = 0;
+									range.len = 0;  // Mark range for removal
 									if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 										to_delete_zero_ranges_from = i;
 									}
-									
+
+									// Adjust remaining operation
 									op_len = op_ins - op_len - end_range;
 									op_ins = end_range;
 									op_len = -op_len;
 									last_op_to_be_delete = true;
-									dbg!(original_doc_delete_range);
-									dbg!(op_ins);
-									dbg!(op_len);
 								} else {
 									original_doc_delete_range.len += (end_range - aggregate_len) - (op_ins - aggregate_len);
 									op_len = op_ins - op_len - end_range;
@@ -260,18 +257,18 @@ impl OpList {
 									last_op_to_be_delete = true;
 								}
 							} else if op_ins != end_range {
-								// Delete doesn't extend beyond end of range
+								// Delete doesn't extend beyond range end
 								if original_doc_delete_range.ins == i32::MAX {
 									original_doc_delete_range.ins = op_ins - aggregate_len;
 									original_doc_delete_range.len = (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
 									range_delete_index = i;
-									break;	
+									break;
 								} else {
 									original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
-									break;	
+									break;
 								}
 							} else if i == new_oplist_len - 1 {
-								// Last element handling
+								// Last element special case
 								Self::handle_last_element_logic(
 									op_ins, op_len, range, aggregate_len,
 									&mut original_doc_delete_range, &mut range_delete_index,
@@ -280,7 +277,7 @@ impl OpList {
 							}
 						}
 					} else if i == new_oplist_len - 1 {
-						// Operation is after the range
+						// Operation is after this range (last range case)
 						Self::handle_last_element_logic(
 							op_ins, op_len, range, aggregate_len,
 							&mut original_doc_delete_range, &mut range_delete_index,
@@ -288,38 +285,36 @@ impl OpList {
 						);
 					}
 
-					// Update delete range tracking
+					// Update delete range tracking for next iteration
 					last_delete_range_start = range.ins;
 					last_delete_range_end = last_delete_range_start + (-range.len);
 					last_delete_range_index = i;
 					aggregate_len += range.len;
-					continue;
+					continue;  // Move to next range
 				}
 
-				// Handle positive ranges (insertions)
-				// Insertions which extend deleted elements
+				// === HANDLE INSERT RANGES (positive length) ===
+				// Adjust start position for ranges affected by previous deletes
 				if range.ins > previous_delete_range_start && range.ins <= previous_delete_range_end {
-					// This block changes start positions of ranges whose original length has been deleted
-					start_range = previous_delete_range_start + (previous_delete_range_end - previous_delete_range_start) + aggregate_len;
+					start_range = previous_delete_range_start +
+						(previous_delete_range_end - previous_delete_range_start) + aggregate_len;
 				} else {
 					start_range = range.ins + aggregate_len;
 				}
 				end_range = start_range + range.len;
 
-				dbg!(start_range);
-				dbg!(end_range);
-				
-				// Check if operation is within current range
+				// Check if current operation falls within this insert range
 				if Self::is_op_in_range(op_ins, start_range, end_range) {
 					if op_len.is_positive() {
-						// Add to existing range
+						// === INSERT OPERATION WITHIN INSERT RANGE ===
+						// Extend existing range (run-length encoding)
 						range.len += op_len;
-						range_insertion_index = usize::MAX;
+						range_insertion_index = usize::MAX;  // Mark as merged
 						break;
 					} else {
-						// Delete operation within range
+						// === DELETE OPERATION WITHIN INSERT RANGE ===
 						if op_ins - op_len - aggregate_len > (end_range - aggregate_len) && (op_ins != end_range) {
-							// Delete extends beyond end of range
+							// Delete extends beyond range end
 							range.len -= (end_range - aggregate_len) - (op_ins - aggregate_len);
 							if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 								to_delete_zero_ranges_from = i;
@@ -327,25 +322,19 @@ impl OpList {
 
 							aggregate_len += (end_range - aggregate_len) - (op_ins - aggregate_len);
 
-							dbg!(op_ins);
-							dbg!(op_ins - op_len);
-							dbg!(range.clone());
-
 							op_len = op_ins - op_len - end_range;
 							op_ins = end_range;
 							op_len = -op_len;
 							last_op_to_be_delete = true;
 						} else if op_ins != end_range {
-							// Delete doesn't extend beyond end of range
+							// Delete doesn't extend beyond range end
 							range.len -= op_ins - op_len - aggregate_len - (op_ins - aggregate_len);
 							if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 								to_delete_zero_ranges_from = i;
 							}
-							dbg!(range.clone());
 							range_insertion_index = usize::MAX;
 							break;
 						} else if i == new_oplist_len - 1 {
-							// Last element handling
 							Self::handle_last_element_logic(
 								op_ins, op_len, range, aggregate_len,
 								&mut original_doc_delete_range, &mut range_delete_index,
@@ -354,8 +343,9 @@ impl OpList {
 						}
 					}
 				} else if op_ins < start_range {
-					// Split new insertion before the range
+					// === OPERATION BEFORE CURRENT RANGE ===
 					if op_len.is_positive() {
+						// Insert before this range
 						new_range = Op {
 							ins: op_ins - aggregate_len,
 							len: op_len
@@ -363,38 +353,37 @@ impl OpList {
 						range_insertion_index = i;
 						break;
 					} else {
-						// Delete operation before range
-						if op_ins - op_len - aggregate_len > (start_range - aggregate_len) && 
+						// === DELETE BEFORE CURRENT RANGE ===
+						// Complex overlap logic for delete spanning multiple ranges
+						if op_ins - op_len - aggregate_len > (start_range - aggregate_len) &&
 						   op_ins - op_len - aggregate_len <= (end_range - aggregate_len) {
-							// Delete extends beyond start range and below end range
+							// Delete overlaps with range start
 							if original_doc_delete_range.ins == i32::MAX {
 								original_doc_delete_range.ins = op_ins - aggregate_len;
 								original_doc_delete_range.len = (start_range - aggregate_len) - original_doc_delete_range.ins;
-								
+
 								range.len -= (op_ins - op_len - aggregate_len) - (start_range - aggregate_len);
 								if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 									to_delete_zero_ranges_from = i;
 								}
 								range_delete_index = i;
-								dbg!(range.clone());
-								break;	
+								break;
 							} else {
 								original_doc_delete_range.len += (start_range - aggregate_len) - (op_ins - aggregate_len);
 								range.len -= (op_ins - op_len - aggregate_len) - (start_range - aggregate_len);
 								if to_delete_zero_ranges_from == usize::MAX && range.len == 0 {
 									to_delete_zero_ranges_from = i;
 								}
-								dbg!(range.clone());
-								break;	
+								break;
 							}
 						} else if op_ins - op_len - aggregate_len > end_range - aggregate_len {
-							// Delete extends beyond end of range
+							// Delete extends beyond range entirely
 							if original_doc_delete_range.ins == i32::MAX {
 								original_doc_delete_range.ins = op_ins - aggregate_len;
 								original_doc_delete_range.len = (start_range - aggregate_len) - original_doc_delete_range.ins;
 								range_delete_index = i;
-								
-								range.len = 0;
+
+								range.len = 0;  // Mark entire range for deletion
 								if to_delete_zero_ranges_from == usize::MAX {
 									to_delete_zero_ranges_from = i;
 								}
@@ -402,11 +391,9 @@ impl OpList {
 								op_ins = end_range;
 								op_len = -op_len;
 								last_op_to_be_delete = true;
-								dbg!(op_ins);
-								dbg!(op_len);
 							} else {
 								original_doc_delete_range.len += (start_range - aggregate_len) - (op_ins - aggregate_len);
-								
+
 								range.len = 0;
 								if to_delete_zero_ranges_from == usize::MAX {
 									to_delete_zero_ranges_from = i;
@@ -416,34 +403,24 @@ impl OpList {
 								op_ins = end_range;
 								op_len = -op_len;
 								last_op_to_be_delete = true;
-								dbg!(op_ins);
-								dbg!(op_len);
 							}
 						} else {
-							// Delete ends before start of range
+							// Delete ends before range start
 							if original_doc_delete_range.ins == i32::MAX {
 								original_doc_delete_range.ins = op_ins - aggregate_len;
 								original_doc_delete_range.len = (op_ins - op_len - aggregate_len) - (op_ins - aggregate_len);
-								dbg!(original_doc_delete_range.clone());
-								
+
 								range_delete_index = i;
-								break;	
+								break;
 							} else {
 								original_doc_delete_range.len += (op_ins - op_len - aggregate_len) - op_ins - aggregate_len;
-								dbg!(original_doc_delete_range.clone());
-								
+
 								break;
 							}
-						}	
+						}
 					}
 				} else if i == new_oplist_len - 1 {
-					// Operation is after the range
-					dbg!("hello 1");
-					dbg!(start_range);
-					dbg!(end_range);
-					dbg!(op_ins - range.len - aggregate_len);
-					dbg!((op_ins - op_len - range.len - aggregate_len) - (op_ins - range.len - aggregate_len));
-					dbg!(-op_len);
+					// === OPERATION AFTER ALL RANGES ===
 					Self::handle_last_element_logic(
 						op_ins, op_len, range, aggregate_len,
 						&mut original_doc_delete_range, &mut range_delete_index,
@@ -452,9 +429,11 @@ impl OpList {
 				}
 
 				aggregate_len += range.len;
-			} 
+			}
 
-			// Handle extending delete with no more iterations
+			// === POST-PROCESSING ===
+
+			// Handle any remaining delete operation that couldn't be processed
 			if last_op_to_be_delete {
 				if original_doc_delete_range.ins == i32::MAX {
 					original_doc_delete_range.ins = op_ins - aggregate_len;
@@ -471,39 +450,36 @@ impl OpList {
 				new_oplist.ops.insert(range_insertion_index, new_range);
 			}
 
-			// Handle delete range insertion
+			// Handle delete range insertion with complex merging logic
 			if range_delete_index != usize::MAX {
 				debug_assert!(original_doc_delete_range != Op { ins: i32::MAX, len: i32::MAX });
-				dbg!(last_delete_range_start);
-				dbg!(last_delete_range_end);
-				dbg!(previous_delete_range_start);
-				dbg!(previous_delete_range_end);
-				dbg!(range_delete_index);
-				
+
+				// Check if delete extends previous delete (merge adjacent deletes)
 				if last_delete_range_end == original_doc_delete_range.ins {
-					// Delete is extending a previous delete
 					new_oplist.ops[last_delete_range_index].len -= original_doc_delete_range.len;
 
+					// Check for adjacent ranges that can be merged
 					if range_delete_index < new_oplist.ops.len() {
-						if new_oplist.ops[range_delete_index].len.is_negative() && 
+						if new_oplist.ops[range_delete_index].len.is_negative() &&
 						   new_oplist.ops[range_delete_index].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
 							new_oplist.ops[last_delete_range_index].len += new_oplist.ops[range_delete_index].len;
 							new_oplist.ops.remove(range_delete_index);
 						}
 					} else if range_delete_index + 1 < new_oplist.ops.len() {
-						if new_oplist.ops[range_delete_index + 1].len.is_negative() && 
+						if new_oplist.ops[range_delete_index + 1].len.is_negative() &&
 						   new_oplist.ops[range_delete_index + 1].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
 							new_oplist.ops[last_delete_range_index].len += new_oplist.ops[range_delete_index + 1].len;
 							new_oplist.ops.remove(range_delete_index + 1);
 						}
 					}
 				} else if range_delete_index < new_oplist.ops.len() {
-					if new_oplist.ops[range_delete_index].len.is_negative() && 
+					// Handle insertion at various positions with merge logic
+					if new_oplist.ops[range_delete_index].len.is_negative() &&
 					   new_oplist.ops[range_delete_index].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
 						new_oplist.ops[range_delete_index].ins -= original_doc_delete_range.len;
 						new_oplist.ops[range_delete_index].len -= original_doc_delete_range.len;
 					} else if range_delete_index + 1 < new_oplist.ops.len() {
-						if new_oplist.ops[range_delete_index + 1].len.is_negative() && 
+						if new_oplist.ops[range_delete_index + 1].len.is_negative() &&
 						   new_oplist.ops[range_delete_index + 1].ins == original_doc_delete_range.ins + original_doc_delete_range.len {
 							new_oplist.ops[range_delete_index + 1].ins -= original_doc_delete_range.len;
 							new_oplist.ops[range_delete_index + 1].len -= original_doc_delete_range.len;
@@ -519,10 +495,9 @@ impl OpList {
 					original_doc_delete_range.len *= -1;
 					new_oplist.ops.insert(range_delete_index, original_doc_delete_range);
 				}
-				dbg!(original_doc_delete_range);
 			}
 
-			// Remove zero-length ranges
+			// Clean up zero-length ranges efficiently
 			if to_delete_zero_ranges_from != usize::MAX {
 				Self::remove_zero_length_ranges(&mut new_oplist.ops, to_delete_zero_ranges_from);
 			}
