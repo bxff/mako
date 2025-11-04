@@ -1,0 +1,15 @@
+{
+  "name": "mako-ts",
+  "version": "1.0.0",
+  "description": "TypeScript implementation of mako",
+  "main": "main.js",
+  "scripts": {
+    "build": "tsc main.ts --target es2020 --module commonjs --strict",
+    "start": "node main.js",
+    "dev": "ts-node main.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}
