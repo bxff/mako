@@ -70,6 +70,11 @@ enum LocateBias {
 	PreferOutsideInsert,
 }
 
+enum DeleteEmit {
+	Existing(Op),
+	DocSpan { base_start: i64, len: i64 },
+}
+
 impl OpList {
 	fn from_oplist_to_sequential_list(&self) -> OpList {
 		let mut ranges: Vec<Op> = self
@@ -137,12 +142,11 @@ impl OpList {
 				if overlap_len > 0 {
 					let base_offset = overlap_start - doc_cursor;
 					let base_start = base_cursor + base_offset;
-					Self::emit_delete_segment(
+					Self::emit_delete_op(
 						ranges,
 						&mut write_idx,
 						&mut last_delete_idx,
-						base_start,
-						overlap_len,
+						DeleteEmit::DocSpan { base_start, len: overlap_len },
 					);
 					delete_cursor += overlap_len;
 				}
@@ -152,7 +156,12 @@ impl OpList {
 
 			if current.len < 0 {
 				base_cursor += i64::from(-current.len);
-				Self::emit_existing_delete(ranges, &mut write_idx, &mut last_delete_idx, current);
+				Self::emit_delete_op(
+					ranges,
+					&mut write_idx,
+					&mut last_delete_idx,
+					DeleteEmit::Existing(current),
+				);
 			} else if current.len > 0 {
 				let seg_len = current.len as i64;
 				let (overlap_len, _) = Self::segment_overlap(doc_cursor, seg_len, delete_cursor, delete_end);
@@ -175,17 +184,14 @@ impl OpList {
 			let seg_start = doc_cursor;
 			let overlap_start = delete_cursor.max(seg_start);
 			let overlap_len = delete_end - overlap_start;
-			if overlap_len > 0 {
-				let base_offset = overlap_start - seg_start;
-				let base_start = base_cursor + base_offset;
-				Self::emit_delete_segment(
-					ranges,
-					&mut write_idx,
-					&mut last_delete_idx,
-					base_start,
-					overlap_len,
-				);
-			}
+			let base_offset = overlap_start - seg_start;
+			let base_start = base_cursor + base_offset;
+			Self::emit_delete_op(
+				ranges,
+				&mut write_idx,
+				&mut last_delete_idx,
+				DeleteEmit::DocSpan { base_start, len: overlap_len },
+			);
 		}
 
 		ranges.truncate(write_idx);
@@ -284,39 +290,30 @@ impl OpList {
 		(end - start, start)
 	}
 
-	fn emit_delete_segment(
+	fn emit_delete_op(
 		ranges: &mut Vec<Op>,
 		write_idx: &mut usize,
 		last_delete_idx: &mut Option<usize>,
-		base_start: i64,
-		len: i64,
+		source: DeleteEmit,
 	) {
-		if len <= 0 {
-			return;
-		}
-
-		let ins: InsertPos = base_start.try_into().expect("delete base overflow");
-		let len_i32: Length = len.try_into().expect("delete len overflow");
-
-		if let Some(idx) = *last_delete_idx {
-			if Self::delete_end(&ranges[idx]) == ins {
-				ranges[idx].len -= len_i32;
-				return;
+		let delete_op = match source {
+			DeleteEmit::Existing(op) => {
+				debug_assert!(op.len <= 0);
+				if op.len == 0 {
+					return;
+				}
+				op
 			}
-		}
+			DeleteEmit::DocSpan { base_start, len } => {
+				if len <= 0 {
+					return;
+				}
+				let ins: InsertPos = base_start.try_into().expect("delete base overflow");
+				let len_i32: Length = len.try_into().expect("delete len overflow");
+				Op { ins, len: -len_i32 }
+			}
+		};
 
-		Self::write_op(ranges, *write_idx, Op { ins, len: -len_i32 });
-		*last_delete_idx = Some(*write_idx);
-		*write_idx += 1;
-	}
-
-	fn emit_existing_delete(
-		ranges: &mut Vec<Op>,
-		write_idx: &mut usize,
-		last_delete_idx: &mut Option<usize>,
-		delete_op: Op,
-	) {
-		debug_assert!(delete_op.len < 0);
 		if let Some(idx) = *last_delete_idx {
 			if Self::delete_end(&ranges[idx]) == delete_op.ins {
 				ranges[idx].len += delete_op.len;
