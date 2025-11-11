@@ -507,6 +507,10 @@ mod tests {
 		let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127; Testing for delete RLE within delete RLE
 		let expected_result = getOpList([(2,-4)]);
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+
+		// Basic test
+		let test_vec: OpList = getOpListforTesting([(5,5)], [(7,-2)]);
+		let expected_result = getOpList([(5,3)]);  // Should be "heo" at position 5
 	}
 
 }
