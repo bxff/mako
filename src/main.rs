@@ -115,43 +115,95 @@ impl OpList {
 			return;
 		}
 
-		let mut remaining = len;
-		let mut cursor = pos;
-
-		while remaining > 0 {
-			match Self::locate_position(ranges, cursor, LocateBias::PreferInsideInsert) {
-				PositionRef::Insert { index, offset } => {
-					let current_len = ranges[index].len;
-					debug_assert!(current_len >= offset);
-					let available = current_len - offset;
-					let take = remaining.min(available);
-					Self::shrink_insert(ranges, index, take);
-					remaining -= take;
-				}
-				PositionRef::Base { base, index } => {
-					let limit = if index < ranges.len() {
-						ranges[index].ins - base
-					} else {
-						remaining
-					};
-					debug_assert!(limit > 0);
-					let take = remaining.min(limit);
-					Self::merge_delete(ranges, index, base, take);
-					remaining -= take;
-				}
-			}
-		}
-	}
-
-	fn shrink_insert(ranges: &mut Vec<Op>, idx: usize, len: Length) {
-		if len == 0 || idx >= ranges.len() {
+		let delete_start = pos as i64;
+		let delete_end = delete_start + len as i64;
+		if delete_start >= delete_end {
 			return;
 		}
 
-		ranges[idx].len -= len;
-		if ranges[idx].len == 0 {
-			ranges.remove(idx);
+		let mut doc_cursor: i64 = 0;
+		let mut base_cursor: i64 = 0;
+		let mut new_ranges: Vec<Op> = Vec::with_capacity(ranges.len() + 2);
+		let mut last_delete_idx: Option<usize> = None;
+
+		for op in ranges.iter() {
+			let op_base = op.ins as i64;
+
+			if op_base > base_cursor {
+				let gap_len = op_base - base_cursor;
+				if doc_cursor < delete_end {
+					let gap_start_doc = doc_cursor;
+					let gap_end_doc = doc_cursor + gap_len;
+					let overlap_start = gap_start_doc.max(delete_start);
+					let overlap_end = gap_end_doc.min(delete_end);
+					if overlap_end > overlap_start {
+						let delete_base_start = base_cursor + (overlap_start - gap_start_doc);
+						let delete_len = (overlap_end - overlap_start) as Length;
+						Self::push_delete_segment(
+							&mut new_ranges,
+							&mut last_delete_idx,
+							delete_base_start as InsertPos,
+							-delete_len,
+						);
+					}
+				}
+				doc_cursor += gap_len;
+				base_cursor = op_base;
+			}
+
+			if op.len < 0 {
+				Self::push_delete_segment(&mut new_ranges, &mut last_delete_idx, op.ins, op.len);
+				base_cursor += i64::from(-op.len);
+				continue;
+			}
+
+			let seg_len = op.len as i64;
+			let mut kept_len = op.len;
+
+			if doc_cursor < delete_end {
+				let seg_start_doc = doc_cursor;
+				let seg_end_doc = doc_cursor + seg_len;
+				let overlap_start = seg_start_doc.max(delete_start);
+				let overlap_end = seg_end_doc.min(delete_end);
+
+				if overlap_end > overlap_start {
+					let strip = (overlap_end - overlap_start) as Length;
+					if strip >= kept_len {
+						kept_len = 0;
+					} else {
+						kept_len -= strip;
+					}
+				}
+			}
+
+			if kept_len > 0 {
+				let mut new_op = *op;
+				new_op.len = kept_len;
+				new_ranges.push(new_op);
+			}
+
+			doc_cursor += seg_len;
 		}
+
+		if doc_cursor < delete_end {
+			if doc_cursor < delete_start {
+				let skip = delete_start - doc_cursor;
+				doc_cursor += skip;
+				base_cursor += skip;
+			}
+
+			if doc_cursor < delete_end {
+				let remaining = delete_end - doc_cursor;
+				Self::push_delete_segment(
+					&mut new_ranges,
+					&mut last_delete_idx,
+					base_cursor as InsertPos,
+					-(remaining as Length),
+				);
+			}
+		}
+
+		*ranges = new_ranges;
 	}
 
 	fn insert_positive(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, len: Length) {
@@ -180,68 +232,20 @@ impl OpList {
 		ranges.insert(insert_idx, Op { ins: base, len });
 	}
 
-	fn merge_delete(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, len: Length) {
-		if len <= 0 {
+	fn push_delete_segment(ranges: &mut Vec<Op>, last_delete_idx: &mut Option<usize>, ins: InsertPos, len: Length) {
+		if len >= 0 {
 			return;
 		}
 
-		if idx > 0 {
-			if ranges[idx - 1].len < 0 && Self::delete_end(&ranges[idx - 1]) == base {
-				ranges[idx - 1].len -= len;
-				Self::try_merge_adjacent_deletes(ranges, idx - 1);
+		if let Some(idx) = last_delete_idx {
+			if ranges[*idx].len < 0 && Self::delete_end(&ranges[*idx]) == ins {
+				ranges[*idx].len += len;
 				return;
 			}
 		}
 
-		if idx < ranges.len() {
-			if ranges[idx].len < 0 && ranges[idx].ins == base + len {
-				ranges[idx].ins = base;
-				ranges[idx].len -= len;
-				Self::try_merge_adjacent_deletes(ranges, idx);
-				return;
-			}
-		}
-
-		ranges.insert(idx, Op { ins: base, len: -len });
-		Self::try_merge_adjacent_deletes(ranges, idx);
-	}
-
-	fn try_merge_adjacent_deletes(ranges: &mut Vec<Op>, mut idx: usize) {
-		if idx >= ranges.len() || ranges[idx].len >= 0 {
-			return;
-		}
-
-		// Merge backwards across any positives until we hit a delete whose end touches current start.
-		loop {
-			if idx == 0 {
-				break;
-			}
-			let mut prev = idx - 1;
-			while prev > 0 && ranges[prev].len >= 0 {
-				prev -= 1;
-			}
-			if ranges[prev].len < 0 && Self::delete_end(&ranges[prev]) == ranges[idx].ins {
-				ranges[prev].len += ranges[idx].len;
-				ranges.remove(idx);
-				idx = prev;
-			} else {
-				break;
-			}
-		}
-
-		// Merge forwards, skipping over inserts until we find deletes that continue the range.
-		loop {
-			let mut next = idx + 1;
-			while next < ranges.len() && ranges[next].len >= 0 {
-				next += 1;
-			}
-			if next < ranges.len() && ranges[next].len < 0 && ranges[next].ins == Self::delete_end(&ranges[idx]) {
-				ranges[idx].len += ranges[next].len;
-				ranges.remove(next);
-			} else {
-				break;
-			}
-		}
+		ranges.push(Op { ins, len });
+		*last_delete_idx = Some(ranges.len() - 1);
 	}
 
 	fn locate_position(ranges: &[Op], pos: InsertPos, bias: LocateBias) -> PositionRef {
@@ -468,6 +472,11 @@ mod tests {
         // Expected = 127890...
 		let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127; Testing for delete RLE within delete RLE
 		let expected_result = getOpList([(2,-4)]);
+		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+
+		// Basic test
+		let test_vec: OpList = getOpListforTesting([(5,5)], [(7,-2)]);
+		let expected_result = getOpList([(5,3)]);  // Should be "heo" at position 5
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 	}
 
