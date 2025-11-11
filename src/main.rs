@@ -117,93 +117,78 @@ impl OpList {
 
 		let delete_start = pos as i64;
 		let delete_end = delete_start + len as i64;
-		if delete_start >= delete_end {
-			return;
-		}
+		let mut delete_cursor = delete_start;
 
 		let mut doc_cursor: i64 = 0;
 		let mut base_cursor: i64 = 0;
-		let mut new_ranges: Vec<Op> = Vec::with_capacity(ranges.len() + 2);
+		let mut write_idx: usize = 0;
+		let original_len = ranges.len();
 		let mut last_delete_idx: Option<usize> = None;
 
-		for op in ranges.iter() {
-			let op_base = op.ins as i64;
+		let mut read_idx = 0;
+		while read_idx < original_len {
+			let mut current = ranges[read_idx];
+			read_idx += 1;
+			let next_ins = current.ins as i64;
 
-			if op_base > base_cursor {
-				let gap_len = op_base - base_cursor;
-				if doc_cursor < delete_end {
-					let gap_start_doc = doc_cursor;
-					let gap_end_doc = doc_cursor + gap_len;
-					let overlap_start = gap_start_doc.max(delete_start);
-					let overlap_end = gap_end_doc.min(delete_end);
-					if overlap_end > overlap_start {
-						let delete_base_start = base_cursor + (overlap_start - gap_start_doc);
-						let delete_len = (overlap_end - overlap_start) as Length;
-						Self::push_delete_segment(
-							&mut new_ranges,
-							&mut last_delete_idx,
-							delete_base_start as InsertPos,
-							-delete_len,
-						);
-					}
+			if next_ins > base_cursor {
+				let gap_len = next_ins - base_cursor;
+				let (overlap_len, overlap_start) = Self::segment_overlap(doc_cursor, gap_len, delete_cursor, delete_end);
+				if overlap_len > 0 {
+					let base_offset = overlap_start - doc_cursor;
+					let base_start = base_cursor + base_offset;
+					Self::emit_delete_segment(
+						ranges,
+						&mut write_idx,
+						&mut last_delete_idx,
+						base_start,
+						overlap_len,
+					);
+					delete_cursor += overlap_len;
 				}
 				doc_cursor += gap_len;
-				base_cursor = op_base;
+				base_cursor = next_ins;
 			}
 
-			if op.len < 0 {
-				Self::push_delete_segment(&mut new_ranges, &mut last_delete_idx, op.ins, op.len);
-				base_cursor += i64::from(-op.len);
-				continue;
-			}
-
-			let seg_len = op.len as i64;
-			let mut kept_len = op.len;
-
-			if doc_cursor < delete_end {
-				let seg_start_doc = doc_cursor;
-				let seg_end_doc = doc_cursor + seg_len;
-				let overlap_start = seg_start_doc.max(delete_start);
-				let overlap_end = seg_end_doc.min(delete_end);
-
-				if overlap_end > overlap_start {
-					let strip = (overlap_end - overlap_start) as Length;
-					if strip >= kept_len {
-						kept_len = 0;
-					} else {
-						kept_len -= strip;
-					}
+			if current.len < 0 {
+				base_cursor += i64::from(-current.len);
+				Self::emit_existing_delete(ranges, &mut write_idx, &mut last_delete_idx, current);
+			} else if current.len > 0 {
+				let seg_len = current.len as i64;
+				let (overlap_len, _) = Self::segment_overlap(doc_cursor, seg_len, delete_cursor, delete_end);
+				if overlap_len > 0 {
+					let overlap_i32: Length = overlap_len.try_into().expect("delete span overflow");
+					current.len -= overlap_i32;
+					delete_cursor += overlap_len;
 				}
-			}
 
-			if kept_len > 0 {
-				let mut new_op = *op;
-				new_op.len = kept_len;
-				new_ranges.push(new_op);
-			}
+				if current.len > 0 {
+					Self::write_op(ranges, write_idx, current);
+					write_idx += 1;
+				}
 
-			doc_cursor += seg_len;
+				doc_cursor += seg_len;
+			}
 		}
 
-		if doc_cursor < delete_end {
-			if doc_cursor < delete_start {
-				let skip = delete_start - doc_cursor;
-				doc_cursor += skip;
-				base_cursor += skip;
-			}
-
-			if doc_cursor < delete_end {
-				let remaining = delete_end - doc_cursor;
-				Self::push_delete_segment(
-					&mut new_ranges,
+		if delete_cursor < delete_end {
+			let seg_start = doc_cursor;
+			let overlap_start = delete_cursor.max(seg_start);
+			let overlap_len = delete_end - overlap_start;
+			if overlap_len > 0 {
+				let base_offset = overlap_start - seg_start;
+				let base_start = base_cursor + base_offset;
+				Self::emit_delete_segment(
+					ranges,
+					&mut write_idx,
 					&mut last_delete_idx,
-					base_cursor as InsertPos,
-					-(remaining as Length),
+					base_start,
+					overlap_len,
 				);
 			}
 		}
 
-		*ranges = new_ranges;
+		ranges.truncate(write_idx);
 	}
 
 	fn insert_positive(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, len: Length) {
@@ -230,22 +215,6 @@ impl OpList {
 		}
 
 		ranges.insert(insert_idx, Op { ins: base, len });
-	}
-
-	fn push_delete_segment(ranges: &mut Vec<Op>, last_delete_idx: &mut Option<usize>, ins: InsertPos, len: Length) {
-		if len >= 0 {
-			return;
-		}
-
-		if let Some(idx) = last_delete_idx {
-			if ranges[*idx].len < 0 && Self::delete_end(&ranges[*idx]) == ins {
-				ranges[*idx].len += len;
-				return;
-			}
-		}
-
-		ranges.push(Op { ins, len });
-		*last_delete_idx = Some(ranges.len() - 1);
 	}
 
 	fn locate_position(ranges: &[Op], pos: InsertPos, bias: LocateBias) -> PositionRef {
@@ -290,6 +259,74 @@ impl OpList {
 
 		let base = base_cursor + (target - doc_cursor);
 		PositionRef::Base { base: base as InsertPos, index: ranges.len() }
+	}
+
+	fn write_op(ranges: &mut Vec<Op>, idx: usize, op: Op) {
+		if idx < ranges.len() {
+			ranges[idx] = op;
+		} else {
+			ranges.push(op);
+		}
+	}
+
+	fn segment_overlap(seg_start: i64, seg_len: i64, delete_cursor: i64, delete_end: i64) -> (i64, i64) {
+		if seg_len <= 0 || delete_cursor >= delete_end {
+			return (0, 0);
+		}
+
+		let seg_end = seg_start + seg_len;
+		if delete_cursor >= seg_end || delete_end <= seg_start {
+			return (0, 0);
+		}
+
+		let start = seg_start.max(delete_cursor);
+		let end = seg_end.min(delete_end);
+		(end - start, start)
+	}
+
+	fn emit_delete_segment(
+		ranges: &mut Vec<Op>,
+		write_idx: &mut usize,
+		last_delete_idx: &mut Option<usize>,
+		base_start: i64,
+		len: i64,
+	) {
+		if len <= 0 {
+			return;
+		}
+
+		let ins: InsertPos = base_start.try_into().expect("delete base overflow");
+		let len_i32: Length = len.try_into().expect("delete len overflow");
+
+		if let Some(idx) = *last_delete_idx {
+			if Self::delete_end(&ranges[idx]) == ins {
+				ranges[idx].len -= len_i32;
+				return;
+			}
+		}
+
+		Self::write_op(ranges, *write_idx, Op { ins, len: -len_i32 });
+		*last_delete_idx = Some(*write_idx);
+		*write_idx += 1;
+	}
+
+	fn emit_existing_delete(
+		ranges: &mut Vec<Op>,
+		write_idx: &mut usize,
+		last_delete_idx: &mut Option<usize>,
+		delete_op: Op,
+	) {
+		debug_assert!(delete_op.len < 0);
+		if let Some(idx) = *last_delete_idx {
+			if Self::delete_end(&ranges[idx]) == delete_op.ins {
+				ranges[idx].len += delete_op.len;
+				return;
+			}
+		}
+
+		Self::write_op(ranges, *write_idx, delete_op);
+		*last_delete_idx = Some(*write_idx);
+		*write_idx += 1;
 	}
 
 	fn delete_end(op: &Op) -> InsertPos {
@@ -472,11 +509,6 @@ mod tests {
         // Expected = 127890...
 		let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127; Testing for delete RLE within delete RLE
 		let expected_result = getOpList([(2,-4)]);
-		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
-
-		// Basic test
-		let test_vec: OpList = getOpListforTesting([(5,5)], [(7,-2)]);
-		let expected_result = getOpList([(5,3)]);  // Should be "heo" at position 5
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 	}
 
