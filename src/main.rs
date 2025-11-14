@@ -512,6 +512,12 @@ mod tests {
 		let test_vec: OpList = getOpListforTesting([(5,5)], [(7,-2)]);
 		let expected_result = getOpList([(5,3)]);  // Should be "heo" at position 5
 		assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+
+		// // Could be useful
+		// // -11-2---
+		// let test_vec: OpList = getOpListforTesting([(1,1),(1,1)], [(4,1)]);
+		// let expected_result = getOpList([(1,1),(1,1),(2,1)]);
+		// assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 	}
 
 }
