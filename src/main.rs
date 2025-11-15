@@ -100,6 +100,106 @@ impl OpList {
 		OpList { ops: ranges, test_op: None }
 	}
 
+	fn merge_sequential_list(&mut self, other: &OpList) {
+		for op in &other.ops {
+			if op.len == 0 {
+				continue;
+			} else if op.len > 0 {
+				Self::merge_insert(&mut self.ops, *op);
+			} else {
+				Self::merge_delete(&mut self.ops, *op);
+			}
+		}
+	}
+
+	fn merge_insert(ranges: &mut Vec<Op>, op: Op) {
+		debug_assert!(op.len > 0);
+
+		let mut idx = 0;
+		while idx < ranges.len() && ranges[idx].ins < op.ins {
+			idx += 1;
+		}
+
+		while idx < ranges.len() && ranges[idx].ins == op.ins {
+			if ranges[idx].len > 0 {
+				ranges[idx].len += op.len;
+				return;
+			}
+			idx += 1;
+		}
+
+		ranges.insert(idx, op);
+	}
+
+	fn merge_delete(ranges: &mut Vec<Op>, op: Op) {
+		debug_assert!(op.len < 0);
+
+		let mut delete_start = op.ins as i64;
+		let mut delete_end = Self::delete_end(&op) as i64;
+		let original_len = ranges.len();
+		let mut read_idx: usize = 0;
+		let mut write_idx: usize = 0;
+		let mut inserted = false;
+		let mut inserted_idx: Option<usize> = None;
+
+		while read_idx < original_len {
+			let current = ranges[read_idx];
+			read_idx += 1;
+
+			if current.len < 0 {
+				let current_start = current.ins as i64;
+				let current_end = Self::delete_end(&current) as i64;
+
+				if current_end < delete_start {
+					Self::write_op(ranges, write_idx, current);
+					write_idx += 1;
+					continue;
+				}
+
+				if current_start > delete_end {
+					if !inserted {
+						let delete_op = Self::delete_span(delete_start, delete_end);
+						Self::write_op(ranges, write_idx, delete_op);
+						inserted_idx = Some(write_idx);
+						write_idx += 1;
+						inserted = true;
+					}
+					Self::write_op(ranges, write_idx, current);
+					write_idx += 1;
+					continue;
+				}
+
+				delete_start = delete_start.min(current_start);
+				delete_end = delete_end.max(current_end);
+				if let Some(idx) = inserted_idx {
+					ranges[idx] = Self::delete_span(delete_start, delete_end);
+				}
+				continue;
+			}
+
+			let base = current.ins as i64;
+			if !inserted && base >= delete_start {
+				let delete_op = Self::delete_span(delete_start, delete_end);
+				Self::write_op(ranges, write_idx, delete_op);
+				inserted_idx = Some(write_idx);
+				write_idx += 1;
+				inserted = true;
+			}
+
+			Self::write_op(ranges, write_idx, current);
+			write_idx += 1;
+		}
+
+		if !inserted {
+			let delete_op = Self::delete_span(delete_start, delete_end);
+			Self::write_op(ranges, write_idx, delete_op);
+			inserted_idx = Some(write_idx);
+			write_idx += 1;
+		}
+
+		ranges.truncate(write_idx);
+	}
+
 	fn apply_insert(ranges: &mut Vec<Op>, pos: InsertPos, len: Length) {
 		if len <= 0 {
 			return;
@@ -331,6 +431,14 @@ impl OpList {
 		let end = op.ins as i64 - op.len as i64;
 		end as InsertPos
 	}
+
+	fn delete_span(start: i64, end: i64) -> Op {
+		debug_assert!(end > start);
+		let ins: InsertPos = start.try_into().expect("delete base overflow");
+		let len_i64 = end - start;
+		let len: Length = len_i64.try_into().expect("delete len overflow");
+		Op { ins, len: -len }
+	}
 }
 
 fn main() {
@@ -360,6 +468,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn merge_sequential_list_behaviors() {
+		// Provided case: inserts combine and new positions are appended.
+		let mut existing = getOpList([(5, 2), (10, 1)]);
+		let additions = getOpList([(5, 3), (7, 1)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(5, 5), (7, 1), (10, 1)]);
+		assert_eq!(existing, expected);
+
+		// Provided case (also covers previous delete-span test): deletes union together.
+		let mut existing = getOpList([(5, -1)]);
+		let additions = getOpList([(6, -1)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(5, -2)]);
+		assert_eq!(existing, expected);
+
+		// Provided case: delete spans across multiple segments.
+		let mut existing = getOpList([(3, -1), (3, 1), (6, -1)]);
+		let additions = getOpList([(4, -2)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(3, -4), (3, 1)]);
+		assert_eq!(existing, expected);
+
+		// Provided case: delete must land before positive insert at same base.
+		let mut existing = getOpList([(5, 1)]);
+		let additions = getOpList([(5, -2)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(5, -2), (5, 1)]);
+		assert_eq!(existing, expected);
+
+		// Existing case: inserts at identical base sum their lengths.
+		let mut existing = getOpList([(5, 2)]);
+		let additions = getOpList([(5, 3)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(5, 5)]);
+		assert_eq!(existing, expected);
+
+		// Existing case: mixed operations keep final ordering and RLE.
+		let mut existing = getOpList([(5, -2), (5, 1)]);
+		let additions = getOpList([(5, 1), (6, -1)]);
+		existing.merge_sequential_list(&additions);
+		let expected = getOpList([(5, -2), (5, 2)]);
+		assert_eq!(existing, expected);
+	}
 
 	#[test]
 	fn test_whats_already_implemented() {
