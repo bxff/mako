@@ -100,6 +100,46 @@ impl OpList {
 		OpList { ops: ranges, test_op: None }
 	}
 
+	fn from_sequential_list_to_oplist(&mut self) {
+		let mut base_cursor: i64 = 0;
+		let mut doc_cursor: i64 = 0;
+		let mut write_idx: usize = 0;
+
+		for read_idx in 0..self.ops.len() {
+			let range = self.ops[read_idx];
+			if range.len == 0 {
+				continue;
+			}
+
+			let range_base = i64::from(range.ins);
+			if range_base > base_cursor {
+				let advance = range_base - base_cursor;
+				doc_cursor += advance;
+				base_cursor = range_base;
+			}
+
+			if range.len > 0 {
+				let ins: InsertPos = doc_cursor.try_into().expect("insert cursor overflow");
+				Self::write_op(&mut self.ops, write_idx, Op { ins, len: range.len });
+				write_idx += 1;
+				doc_cursor += i64::from(range.len);
+			} else {
+				let delete_len = -i64::from(range.len);
+				let delete_start = doc_cursor;
+				let ins: InsertPos = (delete_start + delete_len)
+					.try_into()
+					.expect("delete cursor overflow");
+				let len: Length = delete_len.try_into().expect("delete len overflow");
+				Self::write_op(&mut self.ops, write_idx, Op { ins, len: -len });
+				write_idx += 1;
+				base_cursor += delete_len;
+			}
+		}
+
+		self.ops.truncate(write_idx);
+		self.test_op = None;
+	}
+
 	fn merge_sequential_list(&mut self, other: &OpList) {
 		for op in &other.ops {
 			if op.len == 0 {
@@ -512,6 +552,42 @@ mod tests {
 		existing.merge_sequential_list(&additions);
 		let expected = getOpList([(5, -2), (5, 2)]);
 		assert_eq!(existing, expected);
+	}
+
+	#[test]
+	fn sequential_list_to_oplist_emits_expected_ops() {
+		let mut sequential = getOpList([(5, -1), (5, 1)]);
+		sequential.from_sequential_list_to_oplist();
+		let expected = getOpList([(6, -1), (5, 1)]);
+		assert_eq!(sequential, expected);
+
+		let mut sequential = getOpList([(2, -4)]);
+		sequential.from_sequential_list_to_oplist();
+		let expected = getOpList([(6, -4)]);
+		assert_eq!(sequential, expected);
+
+		let mut sequential = getOpList([(2, -3), (2, 1)]);
+		sequential.from_sequential_list_to_oplist();
+		let expected = getOpList([(5, -3), (2, 1)]);
+		assert_eq!(sequential, expected);
+
+		let mut sequential = getOpList([(3, -1), (5, 2)]);
+		sequential.from_sequential_list_to_oplist();
+		let expected = getOpList([(4, -1), (4, 2)]);
+		assert_eq!(sequential, expected);
+	}
+
+	#[test]
+	fn sequential_list_preserves_simple_states() {
+		let mut sequential = getOpList([(5, 2), (7, 1)]);
+		let expected_state = sequential.clone();
+		sequential.from_sequential_list_to_oplist();
+		assert_eq!(sequential.from_oplist_to_sequential_list(), expected_state);
+
+		let mut sequential = getOpList([(2, -4)]);
+		let expected_state = sequential.clone();
+		sequential.from_sequential_list_to_oplist();
+		assert_eq!(sequential.from_oplist_to_sequential_list(), expected_state);
 	}
 
 	#[test]
