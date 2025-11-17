@@ -1,11 +1,5 @@
 #![allow(warnings)]
 
-mod RangeHashMap;
-
-use std::{i128::MAX, i32};
-
-use rand::{thread_rng, Rng};
-
 // Type aliases for better readability
 type InsertPos = i32;
 type Length = i32;
@@ -30,7 +24,7 @@ struct OpList {
 // set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe"
 // https://github.com/nico-abram/blondie
 
-/// Creates an OpList from a fixed-size array of operations
+/// Builds an `OpList` from a fixed-size array of (position, length) tuples while clearing any testing state.
 fn getOpList<const N: usize>(list: [(InsertPos, Length); N]) -> OpList {
 	OpList {
 		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
@@ -38,7 +32,7 @@ fn getOpList<const N: usize>(list: [(InsertPos, Length); N]) -> OpList {
 	}
 }
 
-/// Creates an OpList from a Vec of operations
+/// Builds an `OpList` from a runtime `Vec` of (position, length) tuples while clearing any testing state.
 fn getOpListbyVec(list: Vec<(InsertPos, Length)>) -> OpList {
 	OpList {
 		ops: list.into_iter().map(|(ins, len)| Op{ ins, len }).collect(),
@@ -46,7 +40,7 @@ fn getOpListbyVec(list: Vec<(InsertPos, Length)>) -> OpList {
 	}
 }
 
-/// Creates an OpList for testing with pre-existing range list
+/// Builds an `OpList` and seeds it with a pre-existing sequential list for testing.
 fn getOpListforTesting<const N: usize, const M: usize>(
 	pre_existing_range_list: [(InsertPos, Length); N], 
 	oplist: [(InsertPos, Length); M]
@@ -76,6 +70,7 @@ enum DeleteEmit {
 }
 
 impl OpList {
+	/// Replays the operations in order to produce a sequential list of ranges anchored to the base document.
 	fn from_oplist_to_sequential_list(&self) -> OpList {
 		let mut ranges: Vec<Op> = self
 			.test_op
@@ -140,6 +135,7 @@ impl OpList {
 		self.test_op = None;
 	}
 
+	/// Merges another sequential list into `self`, folding inserts and deletes as needed.
 	fn merge_sequential_list(&mut self, other: &OpList) {
 		for op in &other.ops {
 			if op.len == 0 {
@@ -152,6 +148,7 @@ impl OpList {
 		}
 	}
 
+	/// Merges a positive-length operation into an ordered list, combining adjacent inserts at the same base.
 	fn merge_insert(ranges: &mut Vec<Op>, op: Op) {
 		debug_assert!(op.len > 0);
 
@@ -171,6 +168,7 @@ impl OpList {
 		ranges.insert(idx, op);
 	}
 
+	/// Merges a delete operation into an ordered list, coalescing overlapping delete spans.
 	fn merge_delete(ranges: &mut Vec<Op>, op: Op) {
 		debug_assert!(op.len < 0);
 
@@ -240,6 +238,7 @@ impl OpList {
 		ranges.truncate(write_idx);
 	}
 
+	/// Applies an insert to an in-progress sequential range list, respecting insertion bias.
 	fn apply_insert(ranges: &mut Vec<Op>, pos: InsertPos, len: Length) {
 		if len <= 0 {
 			return;
@@ -255,6 +254,7 @@ impl OpList {
 		}
 	}
 
+	/// Applies a delete to an in-progress sequential range list by walking gaps and existing inserts.
 	fn apply_delete(ranges: &mut Vec<Op>, pos: InsertPos, len: Length) {
 		if len <= 0 {
 			return;
@@ -337,6 +337,7 @@ impl OpList {
 		ranges.truncate(write_idx);
 	}
 
+	/// Inserts a positive-length span at the computed index, coalescing with neighbors when possible.
 	fn insert_positive(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, len: Length) {
 		if len <= 0 {
 			return;
@@ -363,6 +364,7 @@ impl OpList {
 		ranges.insert(insert_idx, Op { ins: base, len });
 	}
 
+	/// Finds where a given document position lives within the range list, honoring the provided bias.
 	fn locate_position(ranges: &[Op], pos: InsertPos, bias: LocateBias) -> PositionRef {
 		let mut base_cursor: i64 = 0;
 		let mut doc_cursor: i64 = 0;
@@ -407,6 +409,7 @@ impl OpList {
 		PositionRef::Base { base: base as InsertPos, index: ranges.len() }
 	}
 
+	/// Writes an operation into the vector, growing it only when needed.
 	fn write_op(ranges: &mut Vec<Op>, idx: usize, op: Op) {
 		if idx < ranges.len() {
 			ranges[idx] = op;
@@ -415,6 +418,7 @@ impl OpList {
 		}
 	}
 
+	/// Returns the overlap between a segment and a delete window as `(length, start)`.
 	fn segment_overlap(seg_start: i64, seg_len: i64, delete_cursor: i64, delete_end: i64) -> (i64, i64) {
 		if seg_len <= 0 || delete_cursor >= delete_end {
 			return (0, 0);
@@ -430,6 +434,7 @@ impl OpList {
 		(end - start, start)
 	}
 
+	/// Emits a delete operation, extending the previous delete when adjacent.
 	fn emit_delete_op(
 		ranges: &mut Vec<Op>,
 		write_idx: &mut usize,
@@ -466,12 +471,14 @@ impl OpList {
 		*write_idx += 1;
 	}
 
+	/// Computes the exclusive end position of a delete operation.
 	fn delete_end(op: &Op) -> InsertPos {
 		debug_assert!(op.len < 0);
 		let end = op.ins as i64 - op.len as i64;
 		end as InsertPos
 	}
 
+	/// Creates a delete operation spanning from `start` to `end` in base coordinates.
 	fn delete_span(start: i64, end: i64) -> Op {
 		debug_assert!(end > start);
 		let ins: InsertPos = start.try_into().expect("delete base overflow");
@@ -482,33 +489,13 @@ impl OpList {
 }
 
 fn main() {
-	// let mut test_vec: OpList = getOpList([(5,-2),(4,-2)]); // 1234567 -> 12367 -> 127
-
-	RangeHashMap::todo();
-
-	// dbg!(test_vec.clone());
-	// let mut test_vec = test_vec.from_oplist_to_sequential_list();
-	// dbg!(test_vec.clone());
-	// RangeHashMap::todo();
-
-	// Say once we have two of these results, how should they combine? We can simply create a new list with the two results and call discontinues_range() on it.
-
-	// What do we do about concurrent branches. And sequential concurrent cases too?
-
-	// Wait first add delete.
-	// For cases, --, +-, -+.
-	// All resultant deletes seems to be for the original document
-	// Should probably go though the code again to get a good idea of whats going on. Negative ranges is added normally to positive ranges except for when it removes the range altogether, but for the spicial case of negative case it's added differently.
-	// Potentially create a list to practically test this? It doesn't need to be a text document just a long list. This is like fuzzy testing.
-	
-	// There is an issue with sorting prob because of arrangement of the if else statements, breaking should happen when ins is less than range ins. 
-	
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
+	/// Verifies merging sequential lists coalesce correctly for mixed insert/delete cases.
 	#[test]
 	fn merge_sequential_list_behaviors() {
 		// Provided case: inserts combine and new positions are appended.
@@ -554,6 +541,7 @@ mod tests {
 		assert_eq!(existing, expected);
 	}
 
+	/// Ensures sequential lists are converted back into op lists with expected coordinates.
 	#[test]
 	fn sequential_list_to_oplist_emits_expected_ops() {
 		let mut sequential = getOpList([(5, -1), (5, 1)]);
@@ -577,6 +565,7 @@ mod tests {
 		assert_eq!(sequential, expected);
 	}
 
+	/// Confirms round-trip conversions preserve simple states.
 	#[test]
 	fn sequential_list_preserves_simple_states() {
 		let mut sequential = getOpList([(5, 2), (7, 1)]);
@@ -592,36 +581,17 @@ mod tests {
 
 	#[test]
 	fn test_whats_already_implemented() {
-		// Testing for inserting after all the ranges.
-
-		// getOpListforTesting(getOpList(ops).from_oplist_to_sequential_list(), new_ops_to_add).from_oplist_to_sequential_list()
-		//   -> equvalent to getOpList(ops + new_ops_to_add).from_oplist_to_sequential_list()
-
-		// The state we get from_oplist_to_sequential_list is a special state
-		//   -> we consider some base state, [0,inf) (we showcase this by 123456789...)
-		//   -> deletes are special case here which represents deletes within [0,inf) 
-		//      (e.g. [(5,-2)] would delete 6 & 7 in 123456789... always left to right)
-		//   -> inserts are on top of base state, they are always in context of [0,inf),
-		//      e.g. [(5,1)] would be a in 12345a6789, but note the context could also 
-		//      been deleted, e.g. [(5,-1),(5,1)] would be a in 1234a6789, [(5,-2),(5,1),(6,1)] 
-		//      would be a & b in 1234ab6789. By rule we take negative len first for the 
-		//      same position, i.g. (5,-len) always comes before (5,+len)
-		// The new_ops_to_add are added to state from_oplist_to_sequential_list by getOpListforTesting
-		// getOpList also essentially creates the state by iterating over ops and changing the state one op at a time
-		//   -> inserting an op to the state would require finding it's context in terms of [0,inf)
-		//      e.g. for the state [(5,-1),(5,1)] would be a in 1234a6789, and if we insert [(5,1)]
-		//      would be b in in 1234ab6789 and new state would be [(5,-1),(5,2)], and if we insert [(4,1)]
-		//      would be b in in 1234ba6789 and new state would be [(4,1),(5,-1),(5,1)]. Note we find the 
-		//      insertion position from the normal positioning, but store it in the context of [0,inf)
-		//   -> deletes are similarly operated, they are found using the normal positing, i.g. 7,-1 means
-		//      we are deleting the 7th position element, and we find the 7th position element in context of [0,inf)
-		//      e.g. 5,-1 op onto the state of [(5,-1),(5,1)] would mean deleting a in 1234a6789, and the new
-		//      state would be [(5,-1)], further if we delete again the 5,-1 op we'd get the new state of [(5,-2)]
-		//   -> deletes & inserts RLE, i.g. the ops [(5,-1),(6,-1)] should always become the state [(5,-2)],
-		//      a more complex example ops [(5,-2),(4,-2)] should always become the state [(2,-4)], as
-		//      in 123456789 we delete 45 (as this is the normal op, left to right), then we delete
-		//      36. Similerly for the state [(5,-1),(7,-1)], if we apply the op [(6,-1)], then the new state
-		//      would be [(5,-3)]
+		// This suite seeds a sequential state and layers additional ops on top. When `seq_state`
+		// comes from `getOpList(ops).from_oplist_to_sequential_list()`, we assert:
+		//   getOpListforTesting(seq_state, new_ops).from_oplist_to_sequential_list()
+		//   == getOpList(ops + new_ops).from_oplist_to_sequential_list()
+		//
+		// Representation rules for the seeded sequential state:
+		//   - Coordinates are in base-document space [0, inf); we visualize it as the digit string 123456789...
+		//   - Deletes are stored as negative spans over that base space (e.g. (5, -2) removes base positions 5 and 6).
+		//   - Inserts are anchored to a base position even if that base was deleted; deletes at a base index are ordered before inserts.
+		//   - Adjacent deletes run-length encode into a single span.
+		// The scenarios below use short digit strings to show how ops rewrite the base-backed sequence.
 
         // Base = 1234567890...
         // Pre existing = 123457890...
