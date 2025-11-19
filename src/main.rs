@@ -95,6 +95,78 @@ impl OpList {
 		OpList { ops: ranges, test_op: None }
 	}
 
+	/// Applies `self` on top of a prior `OpList`, adjusting for all offsets so the result mirrors baseline order.
+	fn backwards_apply(&self, prior: &OpList) -> OpList {
+		let mut merged = prior.clone();
+		let ranges = &mut merged.ops;
+		let mut base_cursor: i64 = 0;
+		let mut doc_cursor: i64 = 0;
+		let mut cumulative_shift_all: i64 = 0;
+		let mut cumulative_shift_deletes: i64 = 0;
+		let mut prior_ops_iter = prior.ops.iter().peekable();
+
+		for range in &self.ops {
+			if range.len == 0 {
+				continue;
+			}
+
+			let range_base = i64::from(range.ins);
+			if range_base > base_cursor {
+				let advance = range_base - base_cursor;
+				doc_cursor += advance;
+				base_cursor = range_base;
+			}
+
+			// Process prior operations that affect this range's base position
+			while let Some(prior_op) = prior_ops_iter.peek() {
+				let prior_base = i64::from(prior_op.ins);
+				let effective_base = if prior_op.len > 0 {
+					prior_base
+				} else {
+					// For deletes, the effective base is at the end of the deleted range
+					prior_base + i64::from(-prior_op.len)
+				};
+
+				if effective_base <= range_base {
+					let prior_op = *prior_ops_iter.next().unwrap();
+					if prior_op.len > 0 {
+						cumulative_shift_all += i64::from(prior_op.len);
+					} else {
+						let delete_len = -i64::from(prior_op.len);
+						cumulative_shift_all += -delete_len;
+						cumulative_shift_deletes += -delete_len;
+					}
+				} else {
+					break;
+				}
+			}
+
+			let adjusted_cursor = if range.len > 0 {
+				doc_cursor + cumulative_shift_deletes
+			} else {
+				doc_cursor + cumulative_shift_all
+			};
+
+			if range.len > 0 {
+				let ins: InsertPos = adjusted_cursor.try_into().expect("insert cursor overflow");
+				Self::apply_insert(ranges, ins, range.len);
+				doc_cursor += i64::from(range.len);
+			} else {
+				let delete_len = -i64::from(range.len);
+				let delete_start = adjusted_cursor;
+				let start: InsertPos = delete_start.try_into().expect("delete start overflow");
+				let len: Length = delete_len.try_into().expect("delete len overflow");
+				Self::apply_delete(ranges, start, len);
+				base_cursor += delete_len;
+			}
+		}
+
+		merged.test_op = None;
+		merged
+	}
+
+	
+	/// Converts a sequential range list back into the user-facing op list, compacting along the way.
 	fn from_sequential_list_to_oplist(&mut self) {
 		let mut base_cursor: i64 = 0;
 		let mut doc_cursor: i64 = 0;
@@ -579,6 +651,142 @@ mod tests {
 		assert_eq!(sequential.from_oplist_to_sequential_list(), expected_state);
 	}
 
+	/// Helper: associates each op with its base anchor to simplify reference comparisons.
+	fn ops_with_base(seq: &OpList) -> Vec<(i64, Op)> {
+		let mut result = Vec::new();
+		let mut base_cursor: i64 = 0;
+		let mut doc_cursor: i64 = 0;
+
+		for range in &seq.ops {
+			if range.len == 0 {
+				continue;
+			}
+
+			let range_base = i64::from(range.ins);
+			if range_base > base_cursor {
+				doc_cursor += range_base - base_cursor;
+				base_cursor = range_base;
+			}
+
+			if range.len > 0 {
+				let ins: InsertPos = doc_cursor.try_into().expect("insert cursor overflow");
+				result.push((range_base, Op { ins, len: range.len }));
+				doc_cursor += i64::from(range.len);
+			} else {
+				let delete_len = -i64::from(range.len);
+				let delete_start = doc_cursor;
+				let ins: InsertPos = (delete_start + delete_len)
+					.try_into()
+					.expect("delete cursor overflow");
+				let len: Length = delete_len.try_into().expect("delete len overflow");
+				result.push((range_base, Op { ins, len: -len }));
+				base_cursor += delete_len;
+			}
+		}
+
+		result
+	}
+
+	/// Reference implementation used to validate `backwards_apply`.
+	fn backwards_apply_reference(current: &OpList, prior: &OpList) -> OpList {
+		let mut baseline = prior.clone();
+		let ops = ops_with_base(current);
+		let mut shift_all: i64 = 0;
+		let mut shift_deletes: i64 = 0;
+		let mut prior_ops_iter = prior.ops.iter().peekable();
+
+		for (base, mut op) in ops {
+			// Process prior operations that affect this operation's base position
+			while let Some(prior_op) = prior_ops_iter.peek() {
+				let prior_base = i64::from(prior_op.ins);
+				let effective_base = if prior_op.len > 0 {
+					prior_base
+				} else {
+					// For deletes, the effective base is at the end of the deleted range
+					prior_base + i64::from(-prior_op.len)
+				};
+
+				if effective_base <= base {
+					let prior_op = *prior_ops_iter.next().unwrap();
+					if prior_op.len > 0 {
+						shift_all += i64::from(prior_op.len);
+					} else {
+						let delete_len = -i64::from(prior_op.len);
+						shift_all += -delete_len;
+						shift_deletes += -delete_len;
+					}
+				} else {
+					break;
+				}
+			}
+
+			if op.len == 0 {
+				continue;
+			} else if op.len > 0 {
+				let adjusted = i64::from(op.ins) + shift_deletes;
+				let ins: InsertPos = adjusted.try_into().expect("insert cursor overflow");
+				OpList::apply_insert(&mut baseline.ops, ins, op.len);
+			} else {
+				let start = i64::from(op.ins + op.len) + shift_all;
+				let start_pos: InsertPos = start.try_into().expect("delete start overflow");
+				let len = -op.len;
+				OpList::apply_delete(&mut baseline.ops, start_pos, len);
+			}
+		}
+
+		baseline.test_op = None;
+		baseline
+	}
+
+	/// Spot-checks simple backwards-apply scenarios against the reference version.
+	#[test]
+	fn backwards_apply_handles_simple_examples() {
+		let current = getOpList([(3, -2)]);
+		let prior = getOpList([(2, -1)]);
+		let expected = getOpList([(2, -3)]);
+		assert_eq!(current.backwards_apply(&prior), expected);
+		assert_eq!(current.backwards_apply(&prior), backwards_apply_reference(&current, &prior));
+
+		let current = getOpList([(3, 1)]);
+		let prior = getOpList([(2, 1)]);
+		let expected = getOpList([(2, 2)]);
+		assert_eq!(current.backwards_apply(&prior), expected);
+		assert_eq!(current.backwards_apply(&prior), backwards_apply_reference(&current, &prior));
+	}
+
+	/// Exhaustively compares several composed cases with the reference implementation.
+	#[test]
+	fn backwards_apply_matches_reference_implementation() {
+		let cases = vec![
+			(
+				getOpList([(3, -2)]),
+				getOpList([(2, -1)]),
+			),
+			(
+				getOpList([(3, 1)]),
+				getOpList([(2, 1)]),
+			),
+			(
+				getOpList([(5, -1), (5, 1)]),
+				getOpList([(4, 1)]),
+			),
+			(
+				getOpList([(2, -3), (2, 2), (7, -1)]),
+				getOpList([(6, 2), (9, -2)]),
+			),
+			(
+				getOpList([(1, 2), (4, -1), (4, 1)]),
+				getOpList([(3, -1), (5, 1), (7, -2)]),
+			),
+		];
+
+		for (current, prior) in cases {
+			let expected = backwards_apply_reference(&current, &prior);
+			assert_eq!(current.backwards_apply(&prior), expected);
+		}
+	}
+
+	/// Regression suite covering incremental state building and edge cases.
 	#[test]
 	fn test_whats_already_implemented() {
 		// This suite seeds a sequential state and layers additional ops on top. When `seq_state`
