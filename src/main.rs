@@ -614,6 +614,193 @@ impl OpList {
         let len: Length = len_i64.try_into().expect("delete len overflow");
         Op { ins, len: -len }
     }
+
+    /// Transforms another sequential list against `self`.
+    /// `self` is the base transformation. `other` is the operation to transform.
+    /// Returns a new `OpList` representing `other` applied after `self`.
+    fn transform(&self, other: &OpList) -> OpList {
+        self.transform_impl(other, true)
+    }
+
+    /// Applies a transformation on the sequential list.
+    /// `transformer` is the operation to apply on `self`.
+    fn apply_transformation(&mut self, transformer: &OpList) {
+        let new_ops = transformer.transform_impl(self, false);
+        self.ops = new_ops.ops;
+    }
+
+    fn transform_impl(&self, other: &OpList, shift_on_tie: bool) -> OpList {
+        let mut res_ops = Vec::new();
+        let s_ops = &self.ops;
+        let mut s_i = 0;
+        let mut cumulative_shift: i64 = 0;
+
+        for op in &other.ops {
+            let target = op.ins as i64;
+
+            // Advance s_i to target
+            while s_i < s_ops.len() {
+                let sop = s_ops[s_i];
+                let sop_ins = sop.ins as i64;
+                if sop_ins > target {
+                    break;
+                }
+
+                if sop.len < 0 {
+                    let sop_end = sop_ins - sop.len as i64;
+                    if sop_end > target {
+                        // Overlaps target. Don't consume.
+                        break;
+                    }
+                    // Fully before target
+                    cumulative_shift += sop.len as i64;
+                    s_i += 1;
+                } else {
+                    // Insert
+                    if sop_ins == target && !shift_on_tie {
+                        break;
+                    }
+                    cumulative_shift += sop.len as i64;
+                    s_i += 1;
+                }
+            }
+
+            if op.len > 0 {
+                let mut mapped_pos = target + cumulative_shift;
+                let mut temp_s_i = s_i;
+
+                while temp_s_i < s_ops.len() {
+                    let sop = s_ops[temp_s_i];
+                    let sop_ins = sop.ins as i64;
+                    if sop_ins > target {
+                        break;
+                    }
+
+                    if sop.len > 0 {
+                        if sop_ins == target && !shift_on_tie {
+                            // Don't shift for inserts at target if !shift_on_tie
+                        } else {
+                            mapped_pos += sop.len as i64;
+                        }
+                    } else {
+                        let sop_end = sop_ins - sop.len as i64;
+                        if sop_ins <= target && target < sop_end {
+                            mapped_pos -= target - sop_ins;
+                        }
+                    }
+                    temp_s_i += 1;
+                }
+
+                let ins: InsertPos = mapped_pos.try_into().expect("transform insert overflow");
+                Self::push_op(&mut res_ops, Op { ins, len: op.len });
+            } else {
+                let del_len = -op.len as i64;
+                let del_end = target + del_len;
+                let mut curr = target;
+                let mut temp_s_i = s_i;
+                let mut temp_shift = cumulative_shift;
+
+                // Check if we are inside a delete initially
+                if temp_s_i < s_ops.len() {
+                    let sop = s_ops[temp_s_i];
+                    let sop_ins = sop.ins as i64;
+                    if sop_ins <= curr && sop.len < 0 {
+                        let sop_end = sop_ins - sop.len as i64;
+                        let overlap = sop_end.min(del_end) - curr;
+                        curr += overlap;
+                        temp_shift -= overlap;
+                        if sop_end <= del_end {
+                            temp_s_i += 1;
+                        }
+                    }
+                }
+
+                while curr < del_end {
+                    if temp_s_i >= s_ops.len() {
+                        let len = del_end - curr;
+                        let ins: InsertPos = (curr + temp_shift)
+                            .try_into()
+                            .expect("transform delete overflow");
+                        let len_i32: Length =
+                            len.try_into().expect("transform delete len overflow");
+                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        break;
+                    }
+
+                    let sop = s_ops[temp_s_i];
+                    let sop_ins = sop.ins as i64;
+
+                    if sop_ins >= del_end {
+                        let len = del_end - curr;
+                        let ins: InsertPos = (curr + temp_shift)
+                            .try_into()
+                            .expect("transform delete overflow");
+                        let len_i32: Length =
+                            len.try_into().expect("transform delete len overflow");
+                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        break;
+                    }
+
+                    // sop.ins is in [curr, del_end)
+                    if sop_ins > curr {
+                        let len = sop_ins - curr;
+                        let ins: InsertPos = (curr + temp_shift)
+                            .try_into()
+                            .expect("transform delete overflow");
+                        let len_i32: Length =
+                            len.try_into().expect("transform delete len overflow");
+                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        curr = sop_ins;
+                    }
+
+                    // Now curr == sop_ins
+                    if sop.len > 0 {
+                        if shift_on_tie {
+                            temp_shift += sop.len as i64;
+                        }
+                        temp_s_i += 1;
+                    } else {
+                        let sop_end = sop_ins - sop.len as i64;
+                        let overlap = sop_end.min(del_end) - curr;
+                        curr += overlap;
+                        temp_shift -= overlap;
+                        if sop_end <= del_end {
+                            temp_s_i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        OpList {
+            ops: res_ops,
+            test_op: None,
+        }
+    }
+
+    fn push_op(ops: &mut Vec<Op>, op: Op) {
+        if op.len == 0 {
+            return;
+        }
+        if let Some(last) = ops.last_mut() {
+            if op.len > 0 && last.len > 0 {
+                if last.ins == op.ins {
+                    last.len += op.len;
+                    return;
+                }
+            }
+            if op.len < 0 && last.len < 0 {
+                let last_end = last.ins as i64 - last.len as i64;
+                if last_end == op.ins as i64 {
+                    last.len += op.len;
+                    return;
+                }
+            }
+        }
+        ops.push(op);
+    }
 }
 
 fn main() {}
@@ -666,6 +853,246 @@ mod tests {
         existing.merge_sequential_list(&additions);
         let expected = getOpList([(5, -2), (5, 2)]);
         assert_eq!(existing, expected);
+    }
+
+    #[test]
+    fn transform_behaviors() {
+        let s = getOpList([(5, 2)]);
+        let o = getOpList([(5, 3)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(7, 3)]));
+
+        let s = getOpList([(5, -2), (6, 1)]);
+        let o = getOpList([(6, 1)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(6, 1)]));
+
+        let s = getOpList([(5, 3)]);
+        let o = getOpList([(5, 2)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(8, 2)]));
+
+        let s = getOpList([(5, -2)]);
+        let o = getOpList([(6, 1)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(5, 1)]));
+
+        let s = getOpList([(5, -5)]);
+        let o = getOpList([(3, -10)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(3, -5)]));
+
+        let s = getOpList([(5, 2)]);
+        let o = getOpList([(5, -2)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([(7, -2)]));
+
+        let s = getOpList([(5, -2)]);
+        let o = getOpList([(5, -2)]);
+        let res = s.transform(&o);
+        assert_eq!(res, getOpList([]));
+    }
+
+    #[test]
+    fn apply_transformation_behaviors() {
+        let mut s = getOpList([(5, 3)]);
+        let t = getOpList([(5, 2)]);
+        s.apply_transformation(&t);
+        // (5, 2) applied on (5, 3) -> (5, 3) because t inserts at 5, s inserts at 5.
+        // s is transformed against t.
+        // t.transform(s) with shift_on_tie=false.
+        // s at 5. t at 5. t inserts 2. s is NOT shifted.
+        // So s remains at 5.
+        assert_eq!(s, getOpList([(5, 3)]));
+
+        let mut s = getOpList([(5, 3), (6, 1)]);
+        let t = getOpList([(5, 2)]);
+        s.apply_transformation(&t);
+        // s has (5, 3) and (6, 1).
+        // (5, 3) -> (5, 3) (as above)
+        // (6, 1) -> (8, 1) (shifted by t's insert of 2)
+        assert_eq!(s, getOpList([(5, 3), (8, 1)]));
+    }
+
+    #[test]
+    fn apply_transformation_complex_cases() {
+        // Case 1: Transformer deletes range where self inserts.
+        // Self: Insert "ABC" at 5. (5, 3)
+        // Trans: Delete 2 chars at 5. (5, -2)
+        // Result: Self should still insert at 5, but since the context *before* it didn't change (it's at 5),
+        // and the delete is *at* 5.
+        // If T deletes (5, -2), it means chars 5 and 6 are gone.
+        // S inserts at 5.
+        // In the new document, 5 and 6 are gone. The insertion point 5 is now... 5.
+        // Wait, if 5 and 6 are deleted, the index 5 still exists (it's the start of the deletion).
+        // So S should still be (5, 3).
+        let mut s = getOpList([(5, 3)]);
+        let t = getOpList([(5, -2)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([(5, 3)]));
+
+        // Case 2: Transformer inserts in middle of self's insert.
+        // Self: Insert "ABCD" at 5. (5, 4)
+        // Trans: Insert "XY" at 7. (7, 2)
+        // This is tricky. Self is a single op (5, 4). It doesn't "contain" 7 in the base document.
+        // It inserts at 5.
+        // T inserts at 7.
+        // 7 is AFTER 5.
+        // So T's insert is at index 7 of the BASE document.
+        // S inserts at 5 of the BASE document.
+        // So S is unaffected by T's insert at 7.
+        let mut s = getOpList([(5, 4)]);
+        let t = getOpList([(7, 2)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([(5, 4)]));
+
+        // Case 3: Transformer deletes a range that overlaps with self's delete.
+        // Self: Delete (5, -3) -> deletes 5, 6, 7.
+        // Trans: Delete (6, -3) -> deletes 6, 7, 8.
+        // Overlap is 6, 7.
+        // S deletes 5, 6, 7.
+        // T deletes 6, 7, 8.
+        // We want to transform S against T.
+        // T has deleted 6, 7, 8.
+        // S wants to delete 5, 6, 7.
+        // 6 and 7 are already deleted by T.
+        // So S only needs to delete 5.
+        // 5 is before 6. So 5 is still at 5.
+        // Result: S should become (5, -1).
+        let mut s = getOpList([(5, -3)]);
+        let t = getOpList([(6, -3)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([(5, -1)]));
+
+        // Case 4: Transformer deletes a range that is a subset of self's delete.
+        // Self: Delete (5, -5) -> 5, 6, 7, 8, 9.
+        // Trans: Delete (6, -2) -> 6, 7.
+        // T deletes 6, 7.
+        // S wants to delete 5..10.
+        // 6, 7 are gone.
+        // S needs to delete 5, and 8, 9.
+        // In the new document (after T), 6 and 7 are gone.
+        // 5 is at 5.
+        // 8 becomes 6 (shifted back by 2).
+        // 9 becomes 7.
+        // So S should delete 5, 6, 7 in the new document?
+        // Wait.
+        // Original: 0 1 2 3 4 5 6 7 8 9 10
+        // T deletes 6, 7.
+        // New: 0 1 2 3 4 5 8 9 10
+        // Indices: 0 1 2 3 4 5 6 7 8
+        // S wanted to delete 5, 6, 7, 8, 9.
+        // In New, these correspond to:
+        // 5 -> 5
+        // 6 -> deleted
+        // 7 -> deleted
+        // 8 -> 6
+        // 9 -> 7
+        // So S should delete range [5, 8) in New? i.e. 5, 6, 7.
+        // So S becomes (5, -3).
+        let mut s = getOpList([(5, -5)]);
+        let t = getOpList([(6, -2)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([(5, -3)]));
+
+        // Case 5: Transformer deletes a range that is a superset of self's delete.
+        // Self: Delete (6, -2) -> 6, 7.
+        // Trans: Delete (5, -5) -> 5, 6, 7, 8, 9.
+        // T deletes everything S wanted to delete.
+        // S should become empty.
+        let mut s = getOpList([(6, -2)]);
+        let t = getOpList([(5, -5)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([]));
+
+        // Case 6: Mixed operations.
+        // Self: Insert (5, 2), Delete (8, -2).
+        // Trans: Delete (4, -2) -> 4, 5. Insert (8, 1).
+        //
+        // T: Delete 4, 5. Insert 1 at 8.
+        //
+        // S op 1: Insert (5, 2).
+        // T deletes 4, 5.
+        // Insertion point 5 is at the end of the deletion range [4, 6).
+        // So 5 maps to 4.
+        // S op 1 becomes (4, 2).
+        //
+        // S op 2: Delete (8, -2) -> 8, 9.
+        // T deletes 4, 5. Shift is -2.
+        // T inserts at 8.
+        // S delete starts at 8.
+        // 8 in base maps to 8 - 2 = 6.
+        // But wait, T inserts at 8 (base).
+        // 8 (base) is after 4, 5 (deleted).
+        // So 8 (base) becomes 6.
+        // T inserts at 8 (base).
+        // Since T inserts at 8, and S deletes at 8.
+        // S delete is AT 8. T insert is AT 8.
+        // Does T insert happen before or after S delete?
+        // T is the transformer. We are transforming S against T.
+        // T's insert at 8 means there is new content at 8.
+        // S wanted to delete 8, 9 (original).
+        // S should NOT delete the new content inserted by T.
+        // So S should still delete the original 8, 9.
+        // Original 8 maps to 6 (due to T's delete of 4,5).
+        // T's insert is at 8 (original).
+        // Wait, T's insert is at 8.
+        // If T inserts at 8, it shifts subsequent characters.
+        // But S's delete is AT 8.
+        // Does S delete the inserted char? No.
+        // Does S delete start before or after the inserted char?
+        // Usually, if I delete at X, and you insert at X.
+        // Your insert shifts my delete?
+        // If I delete [8, 10), and you insert at 8.
+        // The content I wanted to delete is now at [8+len, 10+len).
+        // So S should be shifted by T's insert.
+        // T inserts 1 at 8.
+        // So S delete (originally at 8) should now be at 8 + 1 = 9?
+        // Let's trace carefully.
+        // Base: 0 1 2 3 4 5 6 7 8 9 10
+        // T: Delete 4, 5. Insert 'X' at 8.
+        // Step 1 (Delete 4, 5): 0 1 2 3 6 7 8 9 10. (Length reduced by 2).
+        // Indices map: 0->0, ..., 3->3, 6->4, 7->5, 8->6, 9->7.
+        // Step 2 (Insert 'X' at 8):
+        // Wait, T is a list of ops. They are applied sequentially on Base.
+        // T op 1: (4, -2).
+        // T op 2: (8, 1).
+        // Note: T op 2 position (8) is in the coordinate system AFTER T op 1.
+        // After T op 1 (delete 4, 5), the doc is smaller.
+        // If T op 2 is (8, 1), it means insert at index 8 of the INTERMEDIATE doc.
+        // Intermediate doc: 0 1 2 3 6 7 8 9 10.
+        // Index 8 corresponds to...
+        // 0, 1, 2, 3, 4(was 6), 5(was 7), 6(was 8), 7(was 9), 8(was 10).
+        // So T inserts at old 10?
+        //
+        // Let's assume the test setup implies T's ops are sequential.
+        //
+        // S op 1: Insert (5, 2).
+        // Target 5.
+        // T op 1 (4, -2): Deletes 4, 5. 5 is inside/at end of delete.
+        // 5 maps to 4.
+        // T op 2 (8, 1): Insert at 8 (intermediate).
+        // S op 1 is at 4 (intermediate). 4 < 8.
+        // So S op 1 remains at 4.
+        // Result S op 1: (4, 2).
+        //
+        // S op 2: Delete (8, -2) -> 8, 9 (base).
+        // Target 8.
+        // T op 1 (4, -2): Deletes 4, 5.
+        // 8 is > 5. Shift by -2.
+        // 8 maps to 6.
+        // T op 2 (8, 1): Insert at 8 (intermediate).
+        // S op 2 is at 6 (intermediate).
+        // 6 < 8.
+        // So S op 2 is unaffected by T op 2.
+        // Result S op 2: (6, -2).
+        //
+        // So expected: [(4, 2), (6, -2)].
+
+        let mut s = getOpList([(5, 2), (8, -2)]);
+        let t = getOpList([(4, -2), (8, 1)]);
+        s.apply_transformation(&t);
+        assert_eq!(s, getOpList([(4, 2), (6, -2)]));
     }
 
     /// Ensures sequential lists are converted back into op lists with expected coordinates.
