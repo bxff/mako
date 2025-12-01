@@ -4,12 +4,79 @@
 type InsertPos = i32;
 type Length = i32;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-struct Op {
-    /// Insert position in the document
-    ins: InsertPos,
-    /// Length of the operation (positive for insert, negative for delete)
-    len: Length,
+#[derive(Clone, Debug, PartialEq)]
+pub enum Op {
+    Insert { ins: InsertPos, content: String },
+    Delete { ins: InsertPos, len: Length },
+}
+
+impl Op {
+    pub fn len(&self) -> Length {
+        match self {
+            Op::Insert { content, .. } => content.len() as Length,
+            Op::Delete { len, .. } => *len,
+        }
+    }
+
+    pub fn ins(&self) -> InsertPos {
+        match self {
+            Op::Insert { ins, .. } => *ins,
+            Op::Delete { ins, .. } => *ins,
+        }
+    }
+
+    pub fn set_ins(&mut self, new_ins: InsertPos) {
+        match self {
+            Op::Insert { ins, .. } => *ins = new_ins,
+            Op::Delete { ins, .. } => *ins = new_ins,
+        }
+    }
+
+    pub fn append(&mut self, other: Op) {
+        match (self, other) {
+            (Op::Insert { content: c1, .. }, Op::Insert { content: c2, .. }) => {
+                c1.push_str(&c2);
+            }
+            (Op::Delete { len: l1, .. }, Op::Delete { len: l2, .. }) => {
+                *l1 += l2;
+            }
+            _ => panic!("Cannot append mismatched ops"),
+        }
+    }
+
+    pub fn prepend(&mut self, other: Op) {
+        match (self, other) {
+            (Op::Insert { content: c1, .. }, Op::Insert { content: c2, .. }) => {
+                c1.insert_str(0, &c2);
+            }
+            _ => panic!("Cannot prepend mismatched ops"),
+        }
+    }
+
+    pub fn extend_delete(&mut self, delta: Length) {
+        if let Op::Delete { len, .. } = self {
+            *len += delta;
+        } else {
+            panic!("Cannot extend_delete on Insert");
+        }
+    }
+
+    pub fn remove_range(&mut self, start: usize, end: usize) {
+        match self {
+            Op::Insert { content, .. } => {
+                content.replace_range(start..end, "");
+            }
+            _ => panic!("Cannot remove_range on Delete"),
+        }
+    }
+    pub fn insert_at(&mut self, offset: usize, new_content: &str) {
+        match self {
+            Op::Insert { content, .. } => {
+                content.insert_str(offset, new_content);
+            }
+            _ => panic!("Cannot insert_at on Delete"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,42 +84,88 @@ struct OpList {
     /// List of operations to be applied
     ops: Vec<Op>,
     /// Test data for debugging (should be removed in production)
-    test_op: Option<Vec<(InsertPos, Length)>>,
+    test_op: Option<Vec<Op>>,
 }
 
 // set DTRACE = "C:\Users\dex\PC-Developement\blondie\target\release\blondie_dtrace.exe"
 // https://github.com/nico-abram/blondie
 
+trait IntoOp {
+    fn into_op(self) -> Op;
+}
+
+impl IntoOp for (InsertPos, Length) {
+    fn into_op(self) -> Op {
+        let (ins, len) = self;
+        if len >= 0 {
+            panic!("Positive length in (InsertPos, Length) is not allowed. Use (InsertPos, &str) or TestOp instead.");
+        } else {
+            Op::Delete { ins, len }
+        }
+    }
+}
+
+impl IntoOp for (InsertPos, &str) {
+    fn into_op(self) -> Op {
+        let (ins, content) = self;
+        Op::Insert {
+            ins,
+            content: content.to_string(),
+        }
+    }
+}
+
+impl IntoOp for Op {
+    fn into_op(self) -> Op {
+        self
+    }
+}
+
+#[derive(Copy, Clone)]
+enum TestOp {
+    Ins(InsertPos, &'static str),
+    Del(InsertPos, Length),
+}
+
+impl IntoOp for TestOp {
+    fn into_op(self) -> Op {
+        match self {
+            TestOp::Ins(ins, content) => Op::Insert {
+                ins,
+                content: content.to_string(),
+            },
+            TestOp::Del(ins, len) => Op::Delete { ins, len },
+        }
+    }
+}
+
 /// Builds an `OpList` from a fixed-size array of (position, length) tuples while clearing any testing state.
-fn getOpList<const N: usize>(list: [(InsertPos, Length); N]) -> OpList {
+fn getOpList<T: IntoOp, const N: usize>(list: [T; N]) -> OpList {
     OpList {
-        ops: list.into_iter().map(|(ins, len)| Op { ins, len }).collect(),
+        ops: list.into_iter().map(|x| x.into_op()).collect(),
         test_op: None,
     }
 }
 
 /// Builds an `OpList` from a runtime `Vec` of (position, length) tuples while clearing any testing state.
-fn getOpListbyVec(list: Vec<(InsertPos, Length)>) -> OpList {
+fn getOpListbyVec<T: IntoOp>(list: Vec<T>) -> OpList {
     OpList {
-        ops: list.into_iter().map(|(ins, len)| Op { ins, len }).collect(),
+        ops: list.into_iter().map(|x| x.into_op()).collect(),
         test_op: None,
     }
 }
 
 /// Builds an `OpList` and seeds it with a pre-existing sequential list for testing.
-fn getOpListforTesting<const N: usize, const M: usize>(
-    pre_existing_range_list: [(InsertPos, Length); N],
-    oplist: [(InsertPos, Length); M],
+fn getOpListforTesting<T: IntoOp + Copy, U: IntoOp, const N: usize, const M: usize>(
+    pre_existing_range_list: [T; N],
+    oplist: [U; M],
 ) -> OpList {
     OpList {
-        ops: oplist
-            .into_iter()
-            .map(|(ins, len)| Op { ins, len })
-            .collect(),
+        ops: oplist.into_iter().map(|x| x.into_op()).collect(),
         test_op: Some(
             pre_existing_range_list
                 .into_iter()
-                .map(|(ins, len)| (ins, len))
+                .map(|x| x.into_op())
                 .collect(),
         ),
     }
@@ -81,26 +194,24 @@ impl OpList {
         let mut ranges: Vec<Op> = self
             .test_op
             .as_ref()
-            .map(|ops| {
-                ops.iter()
-                    .map(|(ins, len)| Op {
-                        ins: *ins,
-                        len: *len,
-                    })
-                    .collect()
-            })
+            .map(|ops| ops.clone())
             .unwrap_or_else(Vec::new);
 
         for op in &self.ops {
-            if op.len == 0 {
+            if op.len() == 0 {
                 continue;
             }
 
-            if op.len > 0 {
-                Self::apply_insert(&mut ranges, op.ins, op.len);
+            if op.len() > 0 {
+                match op {
+                    Op::Insert { ins, content } => {
+                        Self::apply_insert(&mut ranges, *ins, content.clone());
+                    }
+                    _ => unreachable!(),
+                }
             } else {
-                let start = op.ins + op.len;
-                let len = -op.len;
+                let start = op.ins() + op.len();
+                let len = -op.len();
                 Self::apply_delete(&mut ranges, start, len);
             }
         }
@@ -122,11 +233,11 @@ impl OpList {
         let mut prior_ops_iter = prior.ops.iter().peekable();
 
         for range in &self.ops {
-            if range.len == 0 {
+            if range.len() == 0 {
                 continue;
             }
 
-            let range_base = i64::from(range.ins);
+            let range_base = i64::from(range.ins());
             if range_base > base_cursor {
                 let advance = range_base - base_cursor;
                 doc_cursor += advance;
@@ -135,20 +246,20 @@ impl OpList {
 
             // Process prior operations that affect this range's base position
             while let Some(prior_op) = prior_ops_iter.peek() {
-                let prior_base = i64::from(prior_op.ins);
-                let effective_base = if prior_op.len > 0 {
+                let prior_base = i64::from(prior_op.ins());
+                let effective_base = if prior_op.len() > 0 {
                     prior_base
                 } else {
                     // For deletes, the effective base is at the end of the deleted range
-                    prior_base + i64::from(-prior_op.len)
+                    prior_base + i64::from(-prior_op.len())
                 };
 
                 if effective_base <= range_base {
-                    let prior_op = *prior_ops_iter.next().unwrap();
-                    if prior_op.len > 0 {
-                        cumulative_shift_all += i64::from(prior_op.len);
+                    let prior_op = prior_ops_iter.next().unwrap();
+                    if prior_op.len() > 0 {
+                        cumulative_shift_all += i64::from(prior_op.len());
                     } else {
-                        let delete_len = -i64::from(prior_op.len);
+                        let delete_len = -i64::from(prior_op.len());
                         cumulative_shift_all += -delete_len;
                         cumulative_shift_deletes += -delete_len;
                     }
@@ -157,18 +268,23 @@ impl OpList {
                 }
             }
 
-            let adjusted_cursor = if range.len > 0 {
+            let adjusted_cursor = if range.len() > 0 {
                 doc_cursor + cumulative_shift_deletes
             } else {
                 doc_cursor + cumulative_shift_all
             };
 
-            if range.len > 0 {
+            if range.len() > 0 {
                 let ins: InsertPos = adjusted_cursor.try_into().expect("insert cursor overflow");
-                Self::apply_insert(ranges, ins, range.len);
-                doc_cursor += i64::from(range.len);
+                match range {
+                    Op::Insert { content, .. } => {
+                        Self::apply_insert(ranges, ins, content.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                doc_cursor += i64::from(range.len());
             } else {
-                let delete_len = -i64::from(range.len);
+                let delete_len = -i64::from(range.len());
                 let delete_start = adjusted_cursor;
                 let start: InsertPos = delete_start.try_into().expect("delete start overflow");
                 let len: Length = delete_len.try_into().expect("delete len overflow");
@@ -188,38 +304,37 @@ impl OpList {
         let mut write_idx: usize = 0;
 
         for read_idx in 0..self.ops.len() {
-            let range = self.ops[read_idx];
-            if range.len == 0 {
+            let range = self.ops[read_idx].clone();
+            if range.len() == 0 {
                 continue;
             }
 
-            let range_base = i64::from(range.ins);
+            let range_len = range.len();
+            let range_base = i64::from(range.ins());
             if range_base > base_cursor {
                 let advance = range_base - base_cursor;
                 doc_cursor += advance;
                 base_cursor = range_base;
             }
 
-            if range.len > 0 {
+            if range_len > 0 {
                 let ins: InsertPos = doc_cursor.try_into().expect("insert cursor overflow");
-                Self::write_op(
-                    &mut self.ops,
-                    write_idx,
-                    Op {
-                        ins,
-                        len: range.len,
-                    },
-                );
+                match range {
+                    Op::Insert { content, .. } => {
+                        Self::write_op(&mut self.ops, write_idx, Op::Insert { ins, content });
+                    }
+                    _ => unreachable!(),
+                }
                 write_idx += 1;
-                doc_cursor += i64::from(range.len);
+                doc_cursor += i64::from(range_len);
             } else {
-                let delete_len = -i64::from(range.len);
+                let delete_len = -i64::from(range_len);
                 let delete_start = doc_cursor;
                 let ins: InsertPos = (delete_start + delete_len)
                     .try_into()
                     .expect("delete cursor overflow");
                 let len: Length = delete_len.try_into().expect("delete len overflow");
-                Self::write_op(&mut self.ops, write_idx, Op { ins, len: -len });
+                Self::write_op(&mut self.ops, write_idx, Op::Delete { ins, len: -len });
                 write_idx += 1;
                 base_cursor += delete_len;
             }
@@ -232,28 +347,28 @@ impl OpList {
     /// Merges another sequential list into `self`, folding inserts and deletes as needed.
     fn merge_sequential_list(&mut self, other: &OpList) {
         for op in &other.ops {
-            if op.len == 0 {
+            if op.len() == 0 {
                 continue;
-            } else if op.len > 0 {
-                Self::merge_insert(&mut self.ops, *op);
+            } else if op.len() > 0 {
+                Self::merge_insert(&mut self.ops, op.clone());
             } else {
-                Self::merge_delete(&mut self.ops, *op);
+                Self::merge_delete(&mut self.ops, op.clone());
             }
         }
     }
 
     /// Merges a positive-length operation into an ordered list, combining adjacent inserts at the same base.
     fn merge_insert(ranges: &mut Vec<Op>, op: Op) {
-        debug_assert!(op.len > 0);
+        debug_assert!(op.len() > 0);
 
         let mut idx = 0;
-        while idx < ranges.len() && ranges[idx].ins < op.ins {
+        while idx < ranges.len() && ranges[idx].ins() < op.ins() {
             idx += 1;
         }
 
-        while idx < ranges.len() && ranges[idx].ins == op.ins {
-            if ranges[idx].len > 0 {
-                ranges[idx].len += op.len;
+        while idx < ranges.len() && ranges[idx].ins() == op.ins() {
+            if ranges[idx].len() > 0 {
+                ranges[idx].append(op);
                 return;
             }
             idx += 1;
@@ -264,9 +379,9 @@ impl OpList {
 
     /// Merges a delete operation into an ordered list, coalescing overlapping delete spans.
     fn merge_delete(ranges: &mut Vec<Op>, op: Op) {
-        debug_assert!(op.len < 0);
+        debug_assert!(op.len() < 0);
 
-        let mut delete_start = op.ins as i64;
+        let mut delete_start = op.ins() as i64;
         let mut delete_end = Self::delete_end(&op) as i64;
         let original_len = ranges.len();
         let mut read_idx: usize = 0;
@@ -275,11 +390,11 @@ impl OpList {
         let mut inserted_idx: Option<usize> = None;
 
         while read_idx < original_len {
-            let current = ranges[read_idx];
+            let current = ranges[read_idx].clone();
             read_idx += 1;
 
-            if current.len < 0 {
-                let current_start = current.ins as i64;
+            if current.len() < 0 {
+                let current_start = current.ins() as i64;
                 let current_end = Self::delete_end(&current) as i64;
 
                 if current_end < delete_start {
@@ -309,7 +424,7 @@ impl OpList {
                 continue;
             }
 
-            let base = current.ins as i64;
+            let base = current.ins() as i64;
             if !inserted && base >= delete_start {
                 let delete_op = Self::delete_span(delete_start, delete_end);
                 Self::write_op(ranges, write_idx, delete_op);
@@ -333,17 +448,18 @@ impl OpList {
     }
 
     /// Applies an insert to an in-progress sequential range list, respecting insertion bias.
-    fn apply_insert(ranges: &mut Vec<Op>, pos: InsertPos, len: Length) {
+    fn apply_insert(ranges: &mut Vec<Op>, pos: InsertPos, content: String) {
+        let len = content.len() as Length;
         if len <= 0 {
             return;
         }
 
         match Self::locate_position(ranges, pos, LocateBias::PreferOutsideInsert) {
-            PositionRef::Insert { index, .. } => {
-                ranges[index].len += len;
+            PositionRef::Insert { index, offset } => {
+                ranges[index].insert_at(offset as usize, &content);
             }
             PositionRef::Base { base, index } => {
-                Self::insert_positive(ranges, index, base, len);
+                Self::insert_positive(ranges, index, base, content);
             }
         }
     }
@@ -366,9 +482,9 @@ impl OpList {
 
         let mut read_idx = 0;
         while read_idx < original_len {
-            let mut current = ranges[read_idx];
+            let mut current = ranges[read_idx].clone();
             read_idx += 1;
-            let next_ins = current.ins as i64;
+            let next_ins = current.ins() as i64;
 
             if next_ins > base_cursor {
                 let gap_len = next_ins - base_cursor;
@@ -392,25 +508,26 @@ impl OpList {
                 base_cursor = next_ins;
             }
 
-            if current.len < 0 {
-                base_cursor += i64::from(-current.len);
+            if current.len() < 0 {
+                base_cursor += i64::from(-current.len());
                 Self::emit_delete_op(
                     ranges,
                     &mut write_idx,
                     &mut last_delete_idx,
                     DeleteEmit::Existing(current),
                 );
-            } else if current.len > 0 {
-                let seg_len = current.len as i64;
-                let (overlap_len, _) =
+            } else if current.len() > 0 {
+                let seg_len = current.len() as i64;
+                let (overlap_len, overlap_start) =
                     Self::segment_overlap(doc_cursor, seg_len, delete_cursor, delete_end);
                 if overlap_len > 0 {
-                    let overlap_i32: Length = overlap_len.try_into().expect("delete span overflow");
-                    current.len -= overlap_i32;
+                    let start_offset = (overlap_start - doc_cursor) as usize;
+                    let end_offset = start_offset + overlap_len as usize;
+                    current.remove_range(start_offset, end_offset);
                     delete_cursor += overlap_len;
                 }
 
-                if current.len > 0 {
+                if current.len() > 0 {
                     Self::write_op(ranges, write_idx, current);
                     write_idx += 1;
                 }
@@ -440,7 +557,8 @@ impl OpList {
     }
 
     /// Inserts a positive-length span at the computed index, coalescing with neighbors when possible.
-    fn insert_positive(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, len: Length) {
+    fn insert_positive(ranges: &mut Vec<Op>, idx: usize, base: InsertPos, content: String) {
+        let len = content.len() as Length;
         if len <= 0 {
             return;
         }
@@ -449,21 +567,26 @@ impl OpList {
 
         if insert_idx > 0 {
             if let Some(prev) = ranges.get_mut(insert_idx - 1) {
-                if prev.len > 0 && prev.ins == base {
-                    prev.len += len;
+                if prev.len() > 0 && prev.ins() == base {
+                    prev.append(Op::Insert {
+                        ins: base,
+                        content: content.clone(),
+                    });
                     return;
                 }
             }
         }
 
         if insert_idx < ranges.len() {
-            if ranges[insert_idx].len > 0 && ranges[insert_idx].ins == base {
-                ranges[insert_idx].len += len;
+            if ranges[insert_idx].len() > 0 && ranges[insert_idx].ins() == base {
+                // If we insert at the same base as an existing insert, we prepend.
+                // Example: Existing "ABC" at 1. Insert "A" at 1. Result "AABC".
+                ranges[insert_idx].prepend(Op::Insert { ins: base, content });
                 return;
             }
         }
 
-        ranges.insert(insert_idx, Op { ins: base, len });
+        ranges.insert(insert_idx, Op::Insert { ins: base, content });
     }
 
     /// Finds where a given document position lives within the range list, honoring the provided bias.
@@ -473,7 +596,7 @@ impl OpList {
         let target = pos as i64;
 
         for (index, range) in ranges.iter().enumerate() {
-            let range_base = range.ins as i64;
+            let range_base = range.ins() as i64;
             if range_base > base_cursor {
                 let gap = range_base - base_cursor;
                 if target < doc_cursor + gap {
@@ -487,20 +610,20 @@ impl OpList {
                 base_cursor = range_base;
             }
 
-            if range.len < 0 {
+            if range.len() < 0 {
                 if matches!(bias, LocateBias::PreferOutsideInsert) && target == doc_cursor {
                     return PositionRef::Base {
-                        base: range.ins,
+                        base: range.ins(),
                         index,
                     };
                 }
-                base_cursor += i64::from(-range.len);
+                base_cursor += i64::from(-range.len());
                 continue;
             } else {
-                let insert_len = range.len as i64;
+                let insert_len = range.len() as i64;
                 if matches!(bias, LocateBias::PreferOutsideInsert) && target == doc_cursor {
                     return PositionRef::Base {
-                        base: range.ins,
+                        base: range.ins(),
                         index,
                     };
                 }
@@ -509,7 +632,7 @@ impl OpList {
                 {
                     return PositionRef::Insert {
                         index,
-                        offset: range.len,
+                        offset: range.len(),
                     };
                 }
                 if target < doc_cursor + insert_len
@@ -571,8 +694,8 @@ impl OpList {
     ) {
         let delete_op = match source {
             DeleteEmit::Existing(op) => {
-                debug_assert!(op.len <= 0);
-                if op.len == 0 {
+                debug_assert!(op.len() <= 0);
+                if op.len() == 0 {
                     return;
                 }
                 op
@@ -583,13 +706,13 @@ impl OpList {
                 }
                 let ins: InsertPos = base_start.try_into().expect("delete base overflow");
                 let len_i32: Length = len.try_into().expect("delete len overflow");
-                Op { ins, len: -len_i32 }
+                Op::Delete { ins, len: -len_i32 }
             }
         };
 
         if let Some(idx) = *last_delete_idx {
-            if Self::delete_end(&ranges[idx]) == delete_op.ins {
-                ranges[idx].len += delete_op.len;
+            if Self::delete_end(&ranges[idx]) == delete_op.ins() {
+                ranges[idx].extend_delete(delete_op.len());
                 return;
             }
         }
@@ -601,8 +724,8 @@ impl OpList {
 
     /// Computes the exclusive end position of a delete operation.
     fn delete_end(op: &Op) -> InsertPos {
-        debug_assert!(op.len < 0);
-        let end = op.ins as i64 - op.len as i64;
+        debug_assert!(op.len() < 0);
+        let end = op.ins() as i64 - op.len() as i64;
         end as InsertPos
     }
 
@@ -612,7 +735,7 @@ impl OpList {
         let ins: InsertPos = start.try_into().expect("delete base overflow");
         let len_i64 = end - start;
         let len: Length = len_i64.try_into().expect("delete len overflow");
-        Op { ins, len: -len }
+        Op::Delete { ins, len: -len }
     }
 
     /// Transforms another sequential list against `self`.
@@ -636,54 +759,54 @@ impl OpList {
         let mut cumulative_shift: i64 = 0;
 
         for op in &other.ops {
-            let target = op.ins as i64;
+            let target = op.ins() as i64;
 
             // Advance s_i to target
             while s_i < s_ops.len() {
-                let sop = s_ops[s_i];
-                let sop_ins = sop.ins as i64;
+                let sop = &s_ops[s_i];
+                let sop_ins = sop.ins() as i64;
                 if sop_ins > target {
                     break;
                 }
 
-                if sop.len < 0 {
-                    let sop_end = sop_ins - sop.len as i64;
+                if sop.len() < 0 {
+                    let sop_end = sop_ins - sop.len() as i64;
                     if sop_end > target {
                         // Overlaps target. Don't consume.
                         break;
                     }
                     // Fully before target
-                    cumulative_shift += sop.len as i64;
+                    cumulative_shift += sop.len() as i64;
                     s_i += 1;
                 } else {
                     // Insert
                     if sop_ins == target && !shift_on_tie {
                         break;
                     }
-                    cumulative_shift += sop.len as i64;
+                    cumulative_shift += sop.len() as i64;
                     s_i += 1;
                 }
             }
 
-            if op.len > 0 {
+            if op.len() > 0 {
                 let mut mapped_pos = target + cumulative_shift;
                 let mut temp_s_i = s_i;
 
                 while temp_s_i < s_ops.len() {
-                    let sop = s_ops[temp_s_i];
-                    let sop_ins = sop.ins as i64;
+                    let sop = &s_ops[temp_s_i];
+                    let sop_ins = sop.ins() as i64;
                     if sop_ins > target {
                         break;
                     }
 
-                    if sop.len > 0 {
+                    if sop.len() > 0 {
                         if sop_ins == target && !shift_on_tie {
                             // Don't shift for inserts at target if !shift_on_tie
                         } else {
-                            mapped_pos += sop.len as i64;
+                            mapped_pos += sop.len() as i64;
                         }
                     } else {
-                        let sop_end = sop_ins - sop.len as i64;
+                        let sop_end = sop_ins - sop.len() as i64;
                         if sop_ins <= target && target < sop_end {
                             mapped_pos -= target - sop_ins;
                         }
@@ -692,9 +815,20 @@ impl OpList {
                 }
 
                 let ins: InsertPos = mapped_pos.try_into().expect("transform insert overflow");
-                Self::push_op(&mut res_ops, Op { ins, len: op.len });
+                match op {
+                    Op::Insert { content, .. } => {
+                        Self::push_op(
+                            &mut res_ops,
+                            Op::Insert {
+                                ins,
+                                content: content.clone(),
+                            },
+                        );
+                    }
+                    _ => unreachable!(),
+                }
             } else {
-                let del_len = -op.len as i64;
+                let del_len = -op.len() as i64;
                 let del_end = target + del_len;
                 let mut curr = target;
                 let mut temp_s_i = s_i;
@@ -702,10 +836,10 @@ impl OpList {
 
                 // Check if we are inside a delete initially
                 if temp_s_i < s_ops.len() {
-                    let sop = s_ops[temp_s_i];
-                    let sop_ins = sop.ins as i64;
-                    if sop_ins <= curr && sop.len < 0 {
-                        let sop_end = sop_ins - sop.len as i64;
+                    let sop = &s_ops[temp_s_i];
+                    let sop_ins = sop.ins() as i64;
+                    if sop_ins <= curr && sop.len() < 0 {
+                        let sop_end = sop_ins - sop.len() as i64;
                         let overlap = sop_end.min(del_end) - curr;
                         curr += overlap;
                         temp_shift -= overlap;
@@ -723,12 +857,12 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
                         break;
                     }
 
-                    let sop = s_ops[temp_s_i];
-                    let sop_ins = sop.ins as i64;
+                    let sop = &s_ops[temp_s_i];
+                    let sop_ins = sop.ins() as i64;
 
                     if sop_ins >= del_end {
                         let len = del_end - curr;
@@ -737,7 +871,7 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
                         break;
                     }
 
@@ -749,18 +883,18 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op { ins, len: -len_i32 });
+                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
                         curr = sop_ins;
                     }
 
                     // Now curr == sop_ins
-                    if sop.len > 0 {
+                    if sop.len() > 0 {
                         if shift_on_tie {
-                            temp_shift += sop.len as i64;
+                            temp_shift += sop.len() as i64;
                         }
                         temp_s_i += 1;
                     } else {
-                        let sop_end = sop_ins - sop.len as i64;
+                        let sop_end = sop_ins - sop.len() as i64;
                         let overlap = sop_end.min(del_end) - curr;
                         curr += overlap;
                         temp_shift -= overlap;
@@ -781,20 +915,20 @@ impl OpList {
     }
 
     fn push_op(ops: &mut Vec<Op>, op: Op) {
-        if op.len == 0 {
+        if op.len() == 0 {
             return;
         }
         if let Some(last) = ops.last_mut() {
-            if op.len > 0 && last.len > 0 {
-                if last.ins == op.ins {
-                    last.len += op.len;
+            if op.len() > 0 && last.len() > 0 {
+                if last.ins() == op.ins() {
+                    last.append(op);
                     return;
                 }
             }
-            if op.len < 0 && last.len < 0 {
-                let last_end = last.ins as i64 - last.len as i64;
-                if last_end == op.ins as i64 {
-                    last.len += op.len;
+            if op.len() < 0 && last.len() < 0 {
+                let last_end = last.ins() as i64 - last.len() as i64;
+                if last_end == op.ins() as i64 {
+                    last.extend_delete(op.len());
                     return;
                 }
             }
@@ -813,10 +947,14 @@ mod tests {
     #[test]
     fn merge_sequential_list_behaviors() {
         // Provided case: inserts combine and new positions are appended.
-        let mut existing = getOpList([(5, 2), (10, 1)]);
-        let additions = getOpList([(5, 3), (7, 1)]);
+        let mut existing = getOpList([TestOp::Ins(5, "AB"), TestOp::Ins(10, "C")]);
+        let additions = getOpList([TestOp::Ins(5, "DEF"), TestOp::Ins(7, "G")]);
         existing.merge_sequential_list(&additions);
-        let expected = getOpList([(5, 5), (7, 1), (10, 1)]);
+        let expected = getOpList([
+            TestOp::Ins(5, "ABDEF"),
+            TestOp::Ins(7, "G"),
+            TestOp::Ins(10, "C"),
+        ]);
         assert_eq!(existing, expected);
 
         // Provided case (also covers previous delete-span test): deletes union together.
@@ -827,91 +965,91 @@ mod tests {
         assert_eq!(existing, expected);
 
         // Provided case: delete spans across multiple segments.
-        let mut existing = getOpList([(3, -1), (3, 1), (6, -1)]);
+        let mut existing = getOpList([TestOp::Del(3, -1), TestOp::Ins(3, "A"), TestOp::Del(6, -1)]);
         let additions = getOpList([(4, -2)]);
         existing.merge_sequential_list(&additions);
-        let expected = getOpList([(3, -4), (3, 1)]);
+        let expected = getOpList([TestOp::Del(3, -4), TestOp::Ins(3, "A")]);
         assert_eq!(existing, expected);
 
         // Provided case: delete must land before positive insert at same base.
-        let mut existing = getOpList([(5, 1)]);
+        let mut existing = getOpList([(5, "A")]);
         let additions = getOpList([(5, -2)]);
         existing.merge_sequential_list(&additions);
-        let expected = getOpList([(5, -2), (5, 1)]);
+        let expected = getOpList([TestOp::Del(5, -2), TestOp::Ins(5, "A")]);
         assert_eq!(existing, expected);
 
         // Existing case: inserts at identical base sum their lengths.
-        let mut existing = getOpList([(5, 2)]);
-        let additions = getOpList([(5, 3)]);
+        let mut existing = getOpList([(5, "AB")]);
+        let additions = getOpList([(5, "CDE")]);
         existing.merge_sequential_list(&additions);
-        let expected = getOpList([(5, 5)]);
+        let expected = getOpList([(5, "ABCDE")]);
         assert_eq!(existing, expected);
 
         // Existing case: mixed operations keep final ordering and RLE.
-        let mut existing = getOpList([(5, -2), (5, 1)]);
-        let additions = getOpList([(5, 1), (6, -1)]);
+        let mut existing = getOpList([TestOp::Del(5, -2), TestOp::Ins(5, "A")]);
+        let additions = getOpList([TestOp::Ins(5, "B"), TestOp::Del(6, -1)]);
         existing.merge_sequential_list(&additions);
-        let expected = getOpList([(5, -2), (5, 2)]);
+        let expected = getOpList([TestOp::Del(5, -2), TestOp::Ins(5, "AB")]);
         assert_eq!(existing, expected);
     }
 
     #[test]
     fn transform_behaviors() {
-        let s = getOpList([(5, 2)]);
-        let o = getOpList([(5, 3)]);
+        let s = getOpList([TestOp::Ins(5, "AB")]);
+        let o = getOpList([TestOp::Ins(5, "CDE")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(7, 3)]));
+        assert_eq!(res, getOpList([TestOp::Ins(7, "CDE")]));
 
-        let s = getOpList([(5, -2), (6, 1)]);
-        let o = getOpList([(6, 1)]);
+        let s = getOpList([TestOp::Del(5, -2), TestOp::Ins(6, "G")]);
+        let o = getOpList([TestOp::Ins(6, "F")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(6, 1)]));
+        assert_eq!(res, getOpList([TestOp::Ins(6, "F")]));
 
-        let s = getOpList([(5, 3)]);
-        let o = getOpList([(5, 2)]);
+        let s = getOpList([TestOp::Ins(5, "ABC")]);
+        let o = getOpList([TestOp::Ins(5, "DE")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(8, 2)]));
+        assert_eq!(res, getOpList([TestOp::Ins(8, "DE")]));
 
-        let s = getOpList([(5, -2)]);
-        let o = getOpList([(6, 1)]);
+        let s = getOpList([TestOp::Del(5, -2)]);
+        let o = getOpList([TestOp::Ins(6, "F")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(5, 1)]));
+        assert_eq!(res, getOpList([TestOp::Ins(5, "F")]));
 
-        let s = getOpList([(5, -5)]);
-        let o = getOpList([(3, -10)]);
+        let s = getOpList([TestOp::Del(5, -5)]);
+        let o = getOpList([TestOp::Del(3, -10)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(3, -5)]));
+        assert_eq!(res, getOpList([TestOp::Del(3, -5)]));
 
-        let s = getOpList([(5, 2)]);
-        let o = getOpList([(5, -2)]);
+        let s = getOpList([TestOp::Ins(5, "AB")]);
+        let o = getOpList([TestOp::Del(5, -2)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([(7, -2)]));
+        assert_eq!(res, getOpList([TestOp::Del(7, -2)]));
 
-        let s = getOpList([(5, -2)]);
-        let o = getOpList([(5, -2)]);
+        let s = getOpList([TestOp::Del(5, -2)]);
+        let o = getOpList([TestOp::Del(5, -2)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([]));
+        assert_eq!(res, getOpList::<(InsertPos, Length), 0>([]));
     }
 
     #[test]
     fn apply_transformation_behaviors() {
-        let mut s = getOpList([(5, 3)]);
-        let t = getOpList([(5, 2)]);
+        let mut s = getOpList([(5, "ABC")]);
+        let t = getOpList([(5, "XY")]);
         s.apply_transformation(&t);
         // (5, 2) applied on (5, 3) -> (5, 3) because t inserts at 5, s inserts at 5.
         // s is transformed against t.
         // t.transform(s) with shift_on_tie=false.
         // s at 5. t at 5. t inserts 2. s is NOT shifted.
         // So s remains at 5.
-        assert_eq!(s, getOpList([(5, 3)]));
+        assert_eq!(s, getOpList([(5, "ABC")]));
 
-        let mut s = getOpList([(5, 3), (6, 1)]);
-        let t = getOpList([(5, 2)]);
+        let mut s = getOpList([TestOp::Ins(5, "ABC"), TestOp::Ins(6, "D")]);
+        let t = getOpList([(5, "XY")]);
         s.apply_transformation(&t);
         // s has (5, 3) and (6, 1).
         // (5, 3) -> (5, 3) (as above)
         // (6, 1) -> (8, 1) (shifted by t's insert of 2)
-        assert_eq!(s, getOpList([(5, 3), (8, 1)]));
+        assert_eq!(s, getOpList([TestOp::Ins(5, "ABC"), TestOp::Ins(8, "D")]));
     }
 
     #[test]
@@ -926,10 +1064,10 @@ mod tests {
         // In the new document, 5 and 6 are gone. The insertion point 5 is now... 5.
         // Wait, if 5 and 6 are deleted, the index 5 still exists (it's the start of the deletion).
         // So S should still be (5, 3).
-        let mut s = getOpList([(5, 3)]);
+        let mut s = getOpList([(5, "ABC")]);
         let t = getOpList([(5, -2)]);
         s.apply_transformation(&t);
-        assert_eq!(s, getOpList([(5, 3)]));
+        assert_eq!(s, getOpList([(5, "ABC")]));
 
         // Case 2: Transformer inserts in middle of self's insert.
         // Self: Insert "ABCD" at 5. (5, 4)
@@ -941,10 +1079,10 @@ mod tests {
         // So T's insert is at index 7 of the BASE document.
         // S inserts at 5 of the BASE document.
         // So S is unaffected by T's insert at 7.
-        let mut s = getOpList([(5, 4)]);
-        let t = getOpList([(7, 2)]);
+        let mut s = getOpList([(5, "ABCD")]);
+        let t = getOpList([(7, "XY")]);
         s.apply_transformation(&t);
-        assert_eq!(s, getOpList([(5, 4)]));
+        assert_eq!(s, getOpList([(5, "ABCD")]));
 
         // Case 3: Transformer deletes a range that overlaps with self's delete.
         // Self: Delete (5, -3) -> deletes 5, 6, 7.
@@ -1003,7 +1141,7 @@ mod tests {
         let mut s = getOpList([(6, -2)]);
         let t = getOpList([(5, -5)]);
         s.apply_transformation(&t);
-        assert_eq!(s, getOpList([]));
+        assert_eq!(s, getOpList::<(InsertPos, Length), 0>([]));
 
         // Case 6: Mixed operations.
         // Self: Insert (5, 2), Delete (8, -2).
@@ -1089,18 +1227,18 @@ mod tests {
         //
         // So expected: [(4, 2), (6, -2)].
 
-        let mut s = getOpList([(5, 2), (8, -2)]);
-        let t = getOpList([(4, -2), (8, 1)]);
+        let mut s = getOpList([TestOp::Ins(5, "AB"), TestOp::Del(8, -2)]);
+        let t = getOpList([TestOp::Del(4, -2), TestOp::Ins(8, "X")]);
         s.apply_transformation(&t);
-        assert_eq!(s, getOpList([(4, 2), (6, -2)]));
+        assert_eq!(s, getOpList([TestOp::Ins(4, "AB"), TestOp::Del(6, -2)]));
     }
 
     /// Ensures sequential lists are converted back into op lists with expected coordinates.
     #[test]
     fn sequential_list_to_oplist_emits_expected_ops() {
-        let mut sequential = getOpList([(5, -1), (5, 1)]);
+        let mut sequential = getOpList([TestOp::Del(5, -1), TestOp::Ins(5, "A")]);
         sequential.from_sequential_list_to_oplist();
-        let expected = getOpList([(6, -1), (5, 1)]);
+        let expected = getOpList([TestOp::Del(6, -1), TestOp::Ins(5, "A")]);
         assert_eq!(sequential, expected);
 
         let mut sequential = getOpList([(2, -4)]);
@@ -1108,21 +1246,21 @@ mod tests {
         let expected = getOpList([(6, -4)]);
         assert_eq!(sequential, expected);
 
-        let mut sequential = getOpList([(2, -3), (2, 1)]);
+        let mut sequential = getOpList([TestOp::Del(2, -3), TestOp::Ins(2, "A")]);
         sequential.from_sequential_list_to_oplist();
-        let expected = getOpList([(5, -3), (2, 1)]);
+        let expected = getOpList([TestOp::Del(5, -3), TestOp::Ins(2, "A")]);
         assert_eq!(sequential, expected);
 
-        let mut sequential = getOpList([(3, -1), (5, 2)]);
+        let mut sequential = getOpList([TestOp::Del(3, -1), TestOp::Ins(5, "AB")]);
         sequential.from_sequential_list_to_oplist();
-        let expected = getOpList([(4, -1), (4, 2)]);
+        let expected = getOpList([TestOp::Del(4, -1), TestOp::Ins(4, "AB")]);
         assert_eq!(sequential, expected);
     }
 
     /// Confirms round-trip conversions preserve simple states.
     #[test]
     fn sequential_list_preserves_simple_states() {
-        let mut sequential = getOpList([(5, 2), (7, 1)]);
+        let mut sequential = getOpList([TestOp::Ins(5, "AB"), TestOp::Ins(7, "C")]);
         let expected_state = sequential.clone();
         sequential.from_sequential_list_to_oplist();
         assert_eq!(sequential.from_oplist_to_sequential_list(), expected_state);
@@ -1140,34 +1278,39 @@ mod tests {
         let mut doc_cursor: i64 = 0;
 
         for range in &seq.ops {
-            if range.len == 0 {
+            if range.len() == 0 {
                 continue;
             }
 
-            let range_base = i64::from(range.ins);
+            let range_base = i64::from(range.ins());
             if range_base > base_cursor {
                 doc_cursor += range_base - base_cursor;
                 base_cursor = range_base;
             }
 
-            if range.len > 0 {
+            if range.len() > 0 {
                 let ins: InsertPos = doc_cursor.try_into().expect("insert cursor overflow");
-                result.push((
-                    range_base,
-                    Op {
-                        ins,
-                        len: range.len,
-                    },
-                ));
-                doc_cursor += i64::from(range.len);
+                match range {
+                    Op::Insert { content, .. } => {
+                        result.push((
+                            range_base,
+                            Op::Insert {
+                                ins,
+                                content: content.clone(),
+                            },
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+                doc_cursor += i64::from(range.len());
             } else {
-                let delete_len = -i64::from(range.len);
+                let delete_len = -i64::from(range.len());
                 let delete_start = doc_cursor;
                 let ins: InsertPos = (delete_start + delete_len)
                     .try_into()
                     .expect("delete cursor overflow");
                 let len: Length = delete_len.try_into().expect("delete len overflow");
-                result.push((range_base, Op { ins, len: -len }));
+                result.push((range_base, Op::Delete { ins, len: -len }));
                 base_cursor += delete_len;
             }
         }
@@ -1186,20 +1329,20 @@ mod tests {
         for (base, mut op) in ops {
             // Process prior operations that affect this operation's base position
             while let Some(prior_op) = prior_ops_iter.peek() {
-                let prior_base = i64::from(prior_op.ins);
-                let effective_base = if prior_op.len > 0 {
+                let prior_base = i64::from(prior_op.ins());
+                let effective_base = if prior_op.len() > 0 {
                     prior_base
                 } else {
                     // For deletes, the effective base is at the end of the deleted range
-                    prior_base + i64::from(-prior_op.len)
+                    prior_base + i64::from(-prior_op.len())
                 };
 
                 if effective_base <= base {
-                    let prior_op = *prior_ops_iter.next().unwrap();
-                    if prior_op.len > 0 {
-                        shift_all += i64::from(prior_op.len);
+                    let prior_op = prior_ops_iter.next().unwrap();
+                    if prior_op.len() > 0 {
+                        shift_all += i64::from(prior_op.len());
                     } else {
-                        let delete_len = -i64::from(prior_op.len);
+                        let delete_len = -i64::from(prior_op.len());
                         shift_all += -delete_len;
                         shift_deletes += -delete_len;
                     }
@@ -1208,16 +1351,21 @@ mod tests {
                 }
             }
 
-            if op.len == 0 {
+            if op.len() == 0 {
                 continue;
-            } else if op.len > 0 {
-                let adjusted = i64::from(op.ins) + shift_deletes;
+            } else if op.len() > 0 {
+                let adjusted = i64::from(op.ins()) + shift_deletes;
                 let ins: InsertPos = adjusted.try_into().expect("insert cursor overflow");
-                OpList::apply_insert(&mut baseline.ops, ins, op.len);
+                match op {
+                    Op::Insert { content, .. } => {
+                        OpList::apply_insert(&mut baseline.ops, ins, content);
+                    }
+                    _ => unreachable!(),
+                }
             } else {
-                let start = i64::from(op.ins + op.len) + shift_all;
+                let start = i64::from(op.ins() + op.len()) + shift_all;
                 let start_pos: InsertPos = start.try_into().expect("delete start overflow");
-                let len = -op.len;
+                let len = -op.len();
                 OpList::apply_delete(&mut baseline.ops, start_pos, len);
             }
         }
@@ -1238,9 +1386,9 @@ mod tests {
             backwards_apply_reference(&current, &prior)
         );
 
-        let current = getOpList([(3, 1)]);
-        let prior = getOpList([(2, 1)]);
-        let expected = getOpList([(2, 2)]);
+        let current = getOpList([(3, "A")]);
+        let prior = getOpList([(2, "B")]);
+        let expected = getOpList([(2, "BA")]);
         assert_eq!(current.backwards_apply(&prior), expected);
         assert_eq!(
             current.backwards_apply(&prior),
@@ -1252,16 +1400,29 @@ mod tests {
     #[test]
     fn backwards_apply_matches_reference_implementation() {
         let cases = vec![
-            (getOpList([(3, -2)]), getOpList([(2, -1)])),
-            (getOpList([(3, 1)]), getOpList([(2, 1)])),
-            (getOpList([(5, -1), (5, 1)]), getOpList([(4, 1)])),
             (
-                getOpList([(2, -3), (2, 2), (7, -1)]),
-                getOpList([(6, 2), (9, -2)]),
+                getOpList([TestOp::Del(3, -2)]),
+                getOpList([TestOp::Del(2, -1)]),
             ),
             (
-                getOpList([(1, 2), (4, -1), (4, 1)]),
-                getOpList([(3, -1), (5, 1), (7, -2)]),
+                getOpList([TestOp::Ins(3, "A")]),
+                getOpList([TestOp::Ins(2, "B")]),
+            ),
+            (
+                getOpList([TestOp::Del(5, -1), TestOp::Ins(5, "A")]),
+                getOpList([TestOp::Ins(4, "B")]),
+            ),
+            (
+                getOpList([TestOp::Del(2, -3), TestOp::Ins(2, "AB"), TestOp::Del(7, -1)]),
+                getOpList([TestOp::Ins(6, "CD"), TestOp::Del(9, -2)]),
+            ),
+            (
+                getOpList([
+                    TestOp::Ins(1, "AB"),
+                    TestOp::Del(4, -1),
+                    TestOp::Ins(4, "C"),
+                ]),
+                getOpList([TestOp::Del(3, -1), TestOp::Ins(5, "D"), TestOp::Del(7, -2)]),
             ),
         ];
 
@@ -1289,15 +1450,15 @@ mod tests {
         // Base = 1234567890...
         // Pre existing = 123457890...
         // After new applied (+) = 1234578+90...
-        let test_vec: OpList = getOpListforTesting([(5, -1)], [(7, 1)]);
-        let expected_result = getOpList([(5, -1), (8, 1)]);
+        let test_vec: OpList = getOpListforTesting([(5, -1)], [(7, "A")]);
+        let expected_result = getOpList([TestOp::Del(5, -1), TestOp::Ins(8, "A")]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 12345-67890...
         // After new applied (+) = 12345-6+7890...
-        let test_vec: OpList = getOpListforTesting([(5, 1)], [(7, 1)]);
-        let expected_result = getOpList([(5, 1), (6, 1)]);
+        let test_vec: OpList = getOpListforTesting([(5, "A")], [(7, "B")]);
+        let expected_result = getOpList([TestOp::Ins(5, "A"), TestOp::Ins(6, "B")]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Test cases for: 1234567 -> 123456-7= -> 12345-=
@@ -1305,22 +1466,45 @@ mod tests {
         // Base = 1234567890...
         // Pre existing = 12345-=890...
         // After new applied (+) = 12345+-=890...
-        let test_vec: OpList = getOpListforTesting([(5, -2), (6, 1), (7, 1)], [(5, 1)]);
-        let expected_result = getOpList([(5, 1), (5, -2), (6, 1), (7, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [TestOp::Del(5, -2), TestOp::Ins(6, "A"), TestOp::Ins(7, "B")],
+            [(5, "C")],
+        );
+        let expected_result = getOpList([
+            TestOp::Ins(5, "C"),
+            TestOp::Del(5, -2),
+            TestOp::Ins(6, "A"),
+            TestOp::Ins(7, "B"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 12345-=890...
         // After new applied (+) = 12345-+=890...
-        let test_vec: OpList = getOpListforTesting([(5, -2), (6, 1), (7, 1)], [(6, 1)]);
-        let expected_result = getOpList([(5, -2), (6, 2), (7, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [TestOp::Del(5, -2), TestOp::Ins(6, "A"), TestOp::Ins(7, "B")],
+            [(6, "C")],
+        );
+        let expected_result = getOpList([
+            TestOp::Del(5, -2),
+            TestOp::Ins(6, "AC"),
+            TestOp::Ins(7, "B"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 12345-=890...
         // After new applied (+) = 12345-=8+90...
-        let test_vec: OpList = getOpListforTesting([(5, -2), (6, 1), (7, 1)], [(8, 1)]);
-        let expected_result = getOpList([(5, -2), (6, 1), (7, 1), (8, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [TestOp::Del(5, -2), TestOp::Ins(6, "A"), TestOp::Ins(7, "B")],
+            [(8, "C")],
+        );
+        let expected_result = getOpList([
+            TestOp::Del(5, -2),
+            TestOp::Ins(6, "A"),
+            TestOp::Ins(7, "B"),
+            TestOp::Ins(8, "C"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Test cases for 1-2-35-
@@ -1328,29 +1512,83 @@ mod tests {
         // Base = 1234567890...
         // Pre existing = 1-2-35-67890...
         // After new applied (+) = 1-2-+35-67890...
-        let test_vec: OpList = getOpListforTesting([(1, 1), (2, 1), (3, -1), (5, 1)], [(4, 1)]);
-        let expected_result = getOpList([(1, 1), (2, 2), (3, -1), (5, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Ins(1, "A"),
+                TestOp::Ins(2, "B"),
+                TestOp::Del(3, -1),
+                TestOp::Ins(5, "C"),
+            ],
+            [(4, "D")],
+        );
+        let expected_result = getOpList([
+            TestOp::Ins(1, "A"),
+            TestOp::Ins(2, "BD"),
+            TestOp::Del(3, -1),
+            TestOp::Ins(5, "C"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 1-2-35-67890...
         // After new applied (+) = 1-2-3+5-67890...
-        let test_vec: OpList = getOpListforTesting([(1, 1), (2, 1), (3, -1), (5, 1)], [(5, 1)]);
-        let expected_result = getOpList([(1, 1), (2, 1), (3, 1), (3, -1), (5, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Ins(1, "A"),
+                TestOp::Ins(2, "B"),
+                TestOp::Del(3, -1),
+                TestOp::Ins(5, "C"),
+            ],
+            [(5, "D")],
+        );
+        let expected_result = getOpList([
+            TestOp::Ins(1, "A"),
+            TestOp::Ins(2, "B"),
+            TestOp::Ins(3, "D"),
+            TestOp::Del(3, -1),
+            TestOp::Ins(5, "C"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 1-2-35-67890...
         // After new applied (+) = 1-2-35+-67890...
-        let test_vec: OpList = getOpListforTesting([(1, 1), (2, 1), (3, -1), (5, 1)], [(6, 1)]);
-        let expected_result = getOpList([(1, 1), (2, 1), (3, -1), (5, 2)]);
+        let test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Ins(1, "A"),
+                TestOp::Ins(2, "B"),
+                TestOp::Del(3, -1),
+                TestOp::Ins(5, "C"),
+            ],
+            [(6, "D")],
+        );
+        let expected_result = getOpList([
+            TestOp::Ins(1, "A"),
+            TestOp::Ins(2, "B"),
+            TestOp::Del(3, -1),
+            TestOp::Ins(5, "DC"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 1-2-35-67890...
         // After new applied (+) = 1-2-35-6+7890...
-        let test_vec: OpList = getOpListforTesting([(1, 1), (2, 1), (3, -1), (5, 1)], [(8, 1)]);
-        let expected_result = getOpList([(1, 1), (2, 1), (3, -1), (5, 1), (6, 1)]);
+        let test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Ins(1, "A"),
+                TestOp::Ins(2, "B"),
+                TestOp::Del(3, -1),
+                TestOp::Ins(5, "C"),
+            ],
+            [(8, "D")],
+        );
+        let expected_result = getOpList([
+            TestOp::Ins(1, "A"),
+            TestOp::Ins(2, "B"),
+            TestOp::Del(3, -1),
+            TestOp::Ins(5, "C"),
+            TestOp::Ins(6, "D"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Test for 4,-4 and stuff to check for first elements.
@@ -1367,31 +1605,62 @@ mod tests {
         // Base = 1234567890...
         // Pre existing = 123-=~790...
         // After new applied = 123-=~90...
-        let mut test_vec: OpList =
-            getOpListforTesting([(3, -3), (4, 1), (5, 1), (6, 1), (7, -1)], [(7, -1)]);
-        let expected_result = getOpList([(3, -5), (4, 1), (5, 1), (6, 1)]);
+        let mut test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Del(3, -3),
+                TestOp::Ins(4, "A"),
+                TestOp::Ins(5, "B"),
+                TestOp::Ins(6, "C"),
+                TestOp::Del(7, -1),
+            ],
+            [(7, -1)],
+        );
+        let expected_result = getOpList([
+            TestOp::Del(3, -5),
+            TestOp::Ins(4, "A"),
+            TestOp::Ins(5, "B"),
+            TestOp::Ins(6, "C"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 123-=~790...
         // After new applied = 123-90...
-        let mut test_vec: OpList =
-            getOpListforTesting([(3, -3), (4, 1), (5, 1), (6, 1), (7, -1)], [(7, -3)]);
-        let expected_result = getOpList([(3, -5), (4, 1)]);
+        let mut test_vec: OpList = getOpListforTesting(
+            [
+                TestOp::Del(3, -3),
+                TestOp::Ins(4, "A"),
+                TestOp::Ins(5, "B"),
+                TestOp::Ins(6, "C"),
+                TestOp::Del(7, -1),
+            ],
+            [(7, -3)],
+        );
+        let expected_result = getOpList([TestOp::Del(3, -5), TestOp::Ins(4, "A")]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Pre existing = 1234567-90...
         // After new applied = 12345690...
-        let mut test_vec: OpList = getOpListforTesting([(7, 1), (7, -1)], [(8, -2)]);
+        let mut test_vec: OpList =
+            getOpListforTesting([TestOp::Ins(7, "A"), TestOp::Del(7, -1)], [(8, -2)]);
         let expected_result = getOpList([(6, -2)]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
         // Test = 14678-=~90...
         // Expected = 14678-=~90...
-        let mut test_vec: OpList = getOpList([(5, -1), (3, -1), (6, 3), (2, -1)]); // hard to understand
-        let expected_result = getOpList([(1, -2), (4, -1), (8, 3)]);
+        let mut test_vec: OpList = getOpList([
+            TestOp::Del(5, -1),
+            TestOp::Del(3, -1),
+            TestOp::Ins(6, "ABC"),
+            TestOp::Del(2, -1),
+        ]); // hard to understand
+        let expected_result = getOpList([
+            TestOp::Del(1, -2),
+            TestOp::Del(4, -1),
+            TestOp::Ins(8, "ABC"),
+        ]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Base = 1234567890...
@@ -1402,8 +1671,13 @@ mod tests {
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // Basic test
-        let test_vec: OpList = getOpListforTesting([(5, 5)], [(7, -2)]);
-        let expected_result = getOpList([(5, 3)]); // Should be "heo" at position 5
+        let test_vec: OpList = getOpListforTesting([(5, "ABCDE")], [(7, -2)]);
+        let expected_result = getOpList([(5, "CDE")]); // (7, -2) deletes [5, 7) -> "AB" removed.
+        assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+
+        // Prepend test
+        let test_vec: OpList = getOpListforTesting([(1, "ABC")], [(1, "A")]);
+        let expected_result = getOpList([TestOp::Ins(1, "AABC")]);
         assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
 
         // // Could be useful
