@@ -939,6 +939,103 @@ impl OpList {
 
 fn main() {}
 
+#[derive(Clone, Debug)]
+struct GraphNode {
+    op: OpList,
+    parents: Vec<usize>,
+    children: Vec<usize>,
+}
+
+struct Graph {
+    nodes: std::collections::HashMap<usize, GraphNode>,
+    root: usize,
+    frontier: Vec<usize>,
+}
+
+impl Graph {
+    fn new(root: usize, root_op: OpList) -> Self {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            root,
+            GraphNode {
+                op: root_op,
+                parents: vec![],
+                children: vec![],
+            },
+        );
+        Graph {
+            nodes,
+            root,
+            frontier: vec![root],
+        }
+    }
+
+    fn add_node(&mut self, id: usize, op: OpList, parents: Vec<usize>) {
+        // Update parents to point to this child
+        for &parent_id in &parents {
+            if let Some(parent) = self.nodes.get_mut(&parent_id) {
+                parent.children.push(id);
+            }
+        }
+
+        self.nodes.insert(
+            id,
+            GraphNode {
+                op,
+                parents,
+                children: vec![],
+            },
+        );
+    }
+
+    fn merge_graph(&self) -> OpList {
+        let mut visited = std::collections::HashSet::new();
+        self.walk(self.root, &mut visited)
+    }
+
+    fn walk(&self, node_id: usize, visited: &mut std::collections::HashSet<usize>) -> OpList {
+        if visited.contains(&node_id) {
+            return OpList {
+                ops: vec![],
+                test_op: None,
+            };
+        }
+        visited.insert(node_id);
+
+        let node = self.nodes.get(&node_id).expect("Node not found");
+        let node_seq = node.op.from_oplist_to_sequential_list();
+
+        if node.children.is_empty() {
+            return node_seq;
+        }
+
+        let mut sorted_children = node.children.clone();
+        sorted_children.sort();
+
+        let mut child_results = Vec::new();
+        for child_id in sorted_children {
+            child_results.push(self.walk(child_id, visited));
+        }
+
+        let mut merged_children = child_results[0].clone();
+        for other in &child_results[1..] {
+            merged_children.merge_sequential_list(other);
+        }
+
+        merged_children.backwards_apply(&node_seq)
+    }
+}
+
+fn oplist_to_string(oplist: &OpList) -> String {
+    let mut res = String::new();
+    for op in &oplist.ops {
+        if let Op::Insert { content, .. } = op {
+            res.push_str(content);
+        }
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1685,5 +1782,161 @@ mod tests {
         // let test_vec: OpList = getOpListforTesting([(1,1),(1,1)], [(4,1)]);
         // let expected_result = getOpList([(1,1),(1,1),(2,1)]);
         // assert_eq!(test_vec.from_oplist_to_sequential_list(), expected_result);
+    }
+    #[test]
+    fn test_merge_graph_diamond() {
+        // Graph structure:
+        //      1(A)
+        //     /   \
+        //   2(B)   \ (2 also connects to 4? Original request: 1->2, 2->3, 2->4)
+        //   /  \    \
+        // 3(C) 4(D)  \
+        //
+        // Wait, request said: 1->2 (1 splits to 2?), 2 splits to 3 and 4?
+        // "start->1,2; 1->3,4"
+        // Diamond example I implemented:
+        // 1 (root) -> 2
+        // 2 -> 3
+        // 2 -> 4
+
+        let op1 = getOpList([(0, "A")]);
+        let mut graph = Graph::new(1, op1);
+
+        let op2 = getOpList([(1, "B")]);
+        graph.add_node(2, op2, vec![1]);
+
+        let op3 = getOpList([(2, "C")]);
+        graph.add_node(3, op3, vec![2]);
+
+        let op4 = getOpList([(2, "D")]);
+        graph.add_node(4, op4, vec![2]);
+
+        let mut final_oplist = graph.merge_graph();
+        final_oplist.from_sequential_list_to_oplist();
+
+        // Expected: A -> B -> (C merged D)
+        // C and D are siblings at same insertion point (2, relative to AB).
+        // Deterministic sort: 3 processed before 4.
+        // 3 inserts C at 2.
+        // 4 inserts D at 2.
+        // Merging 4 into 3: D is inserted at 2.
+        // If 3 has "C" at 2. 4 inserts "D" at 2.
+        // "D" should be merged. If same position, `merge_insert` uses `ranges.insert(idx, op)`.
+        // So D comes before C? Or after?
+        // `merge_insert`: "while ranges[idx].ins() < op.ins() ... while ranges[idx].ins() == op.ins() ... insert"
+        // It skips existing inserts at same position -> inserts after them?
+        // Wait: `while idx < ranges.len() && ranges[idx].ins() == op.ins()` loops over *all* existing inserts at that pos.
+        // Then `ranges.insert(idx, op)` -> inserts *after* them (since idx incremented).
+        // So D (from 4) will be AFTER C (from 3).
+        // Result: A B C D.
+
+        let res = oplist_to_string(&final_oplist);
+        assert_eq!(res, "ABCD");
+    }
+
+    #[test]
+    fn test_merge_shared_parents_siblings() {
+        // Test merging multiple siblings to ensure deterministic order and memoization.
+        // Root(A) -> 2(B), 3(C), 4(D)
+        // Graph:
+        //      1(A)
+        //    / | \
+        //   2  3  4
+        // All insert at position 1 (after A).
+
+        let op1 = getOpList([(0, "A")]);
+        let mut graph = Graph::new(1, op1); // A
+
+        let op2 = getOpList([(1, "B")]);
+        graph.add_node(2, op2, vec![1]);
+
+        let op3 = getOpList([(1, "C")]);
+        graph.add_node(3, op3, vec![1]);
+
+        let op4 = getOpList([(1, "D")]);
+        graph.add_node(4, op4, vec![1]);
+
+        // Walk 1 calls walk(2), walk(3), walk(4).
+        // Result 2: B (at 1)
+        // Result 3: C (at 1)
+        // Result 4: D (at 1)
+
+        // Merge order: 2 (base) points to B.
+        // Merge 3 into 2: C at 1. Existing B at 1. C inserts after B -> BC.
+        // Merge 4 into 2: D at 1. Existing B, C at 1. D inserts after C -> BCD.
+        // Apply backwards to A -> ABCD.
+
+        let mut final_oplist = graph.merge_graph();
+        final_oplist.from_sequential_list_to_oplist();
+
+        let res = oplist_to_string(&final_oplist);
+        assert_eq!(res, "ABCD");
+    }
+
+    #[test]
+    fn test_dag_shared_children() {
+        // DAG Structure:
+        //      0 (Root)
+        //     /  \
+        //    1    2
+        //    | \/ |
+        //    | /\ |
+        //    3    4
+        //
+        // 1 -> 3, 4
+        // 2 -> 3, 4
+
+        let op0 = getOpList([(0, "A")]);
+        let mut graph = Graph::new(0, op0);
+
+        let op1 = getOpList([(1, "B")]);
+        graph.add_node(1, op1, vec![0]);
+
+        let op2 = getOpList([(1, "C")]);
+        graph.add_node(2, op2, vec![0]);
+
+        let op3 = getOpList([(2, "D")]);
+        graph.add_node(3, op3, vec![1, 2]);
+
+        let op4 = getOpList([(2, "E")]);
+        graph.add_node(4, op4, vec![1, 2]);
+
+        // TEST INTERMEDIATE STATES with Deduplication
+        // ------------------------------------------
+        // Visited set persists across calls if we reuse it.
+        // But here we want to check what walk(1) produces in isolation.
+
+        let mut visited = std::collections::HashSet::new();
+        // walk(1): Visits 1, then 3, then 4.
+        // Result: BDE.
+        let res1 = graph.walk(1, &mut visited);
+        assert_eq!(oplist_to_string(&res1), "BDE");
+
+        // walk(2): Visits 2.
+        // Children 3 and 4 are ALREADY IN VISITED from walk(1).
+        // So they return empty.
+        // Result: C + empty = C.
+        let res2 = graph.walk(2, &mut visited);
+        assert_eq!(oplist_to_string(&res2), "C");
+
+        // Full Merge Logic (fresh start)
+        // ------------------------------
+        // merge_graph() creates a fresh visited set.
+        // Root A.
+        // Visit 1: returns BDE. (Visited: 0, 1, 3, 4)
+        // Visit 2: returns C. (Visited: 0, 1, 3, 4, 2). Children 3, 4 skipped.
+        // Merge 1 (BDE) and 2 (C).
+        // BDE at 1. C at 1.
+        // Deterministic sort: 1 processed before 2.
+        // 1 inserts BDE. 2 inserts C.
+        // 2 merges into 1. C inserts after BDE?
+        // Wait, C is at 1. BDE is at 1.
+        // If range ins == op ins, we insert.
+        // BDE is inserted. C is inserted.
+        // Result: A BDE C. -> ABDEC.
+
+        let final_oplist = graph.merge_graph();
+        let res = oplist_to_string(&final_oplist);
+        assert_eq!(res, "ABDEC");
     }
 }
