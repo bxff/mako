@@ -271,7 +271,7 @@ impl OpList {
             let adjusted_cursor = if range.len() > 0 {
                 doc_cursor + cumulative_shift_deletes
             } else {
-                doc_cursor + cumulative_shift_all
+                doc_cursor + cumulative_shift_deletes
             };
 
             if range.len() > 0 {
@@ -1508,53 +1508,6 @@ mod tests {
                 getOpList([TestOp::Del(5, -2), TestOp::Ins(5, "A")]),
                 getOpList([TestOp::Ins(5, "B"), TestOp::Del(6, -1)]),
             ),
-        ];
-
-        for (existing, additions) in cases {
-            let normal_doc = final_doc_after_normal_apply(&existing, &additions);
-            let merge_doc = final_doc_after_merge(&existing, &additions);
-            assert_eq!(
-                normal_doc, merge_doc,
-                "Normal apply diverged from merge for existing {:?} and additions {:?}",
-                existing.ops, additions.ops
-            );
-        }
-    }
-
-    /// Checks whether comparing transformed/backwards-apply vs merge should converge or diverge.
-    fn assert_transform_backwards_matches_merge(base: OpList, other: OpList) {
-        let seq_base = base.from_oplist_to_sequential_list();
-        let seq_other = other.from_oplist_to_sequential_list();
-
-        let transformed = seq_base.transform(&seq_other);
-        let applied = transformed.backwards_apply(&seq_base);
-
-        let mut merged = seq_base.clone();
-        merged.merge_sequential_list(&seq_other);
-
-        let applied_doc = final_doc_from_oplist(&applied);
-        let merged_doc = final_doc_from_oplist(&merged);
-        let has_delete = seq_other.ops.iter().any(|op| op.len() < 0);
-
-        if has_delete {
-            assert_ne!(
-                applied_doc, merged_doc,
-                "Backwards apply unexpectedly matched merge for delete-heavy case base {:?} other {:?}",
-                seq_base.ops, seq_other.ops
-            );
-        } else {
-            assert_eq!(
-                applied_doc, merged_doc,
-                "Final documents diverge for base {:?} and other {:?}",
-                seq_base.ops, seq_other.ops
-            );
-        }
-    }
-
-    #[test]
-    /// Insert-only cases should keep merge/backwards_apply in sync.
-    fn transform_backwards_matches_merge_sequential_list() {
-        let cases = vec![
             (
                 getOpList([TestOp::Ins(5, "ABC")]),
                 getOpList([TestOp::Ins(5, "DE")]),
@@ -1567,33 +1520,37 @@ mod tests {
                 getOpList([TestOp::Ins(2, "AB"), TestOp::Ins(6, "CD")]),
                 getOpList([TestOp::Ins(4, "XYZ")]),
             ),
+            (
+                getOpList([TestOp::Ins(5, "AB")]),
+                getOpList([TestOp::Del(10, -2)]),
+            ),
         ];
 
-        for (base, other) in cases {
-            assert_transform_backwards_matches_merge(base, other);
+        for (existing, additions) in cases {
+            let normal_doc = final_doc_after_normal_apply(&existing, &additions);
+            let merge_doc = final_doc_after_merge(&existing, &additions);
+            let backwards_doc = final_doc_after_backwards_apply(&existing, &additions);
+            assert_eq!(
+                normal_doc, merge_doc,
+                "Normal apply diverged from merge for existing {:?} and additions {:?}",
+                existing.ops, additions.ops
+            );
+            assert_eq!(
+                merge_doc, backwards_doc,
+                "Backwards apply diverged from merge for existing {:?} and additions {:?}",
+                existing.ops, additions.ops
+            );
         }
     }
 
-    #[test]
-    /// Delete-heavy example should be flagged as a known fail for `backwards_apply`.
-    fn transform_backwards_detects_delete_mismatch() {
-        assert_transform_backwards_matches_merge(
-            getOpList([TestOp::Ins(5, "AB")]),
-            getOpList([TestOp::Del(10, -2)]),
-        );
-    }
+    /// Returns the final document after transforming and backwards-applying `other` on `base`.
+    fn final_doc_after_backwards_apply(base: &OpList, other: &OpList) -> String {
+        let seq_base = base.from_oplist_to_sequential_list();
+        let seq_other = other.from_oplist_to_sequential_list();
 
-    #[test]
-    /// Confirms the normalized apply path matches the merge result for deletes.
-    fn from_sequential_list_to_oplist_apply_matches_merge_for_delete_case() {
-        let base = getOpList([TestOp::Ins(5, "AB")]);
-        let other = getOpList([TestOp::Del(10, -2)]);
-        let normal_doc = final_doc_after_normal_apply(&base, &other);
-        let merged_doc = final_doc_after_merge(&base, &other);
-        assert_eq!(
-            normal_doc, merged_doc,
-            "Applying ops sequentially after converting the transformed list now matches the merge result"
-        );
+        let transformed = seq_base.transform(&seq_other);
+        let applied = transformed.backwards_apply(&seq_base);
+        final_doc_from_oplist(&applied)
     }
 
     /// Reference implementation used to validate `backwards_apply`.
@@ -1641,7 +1598,7 @@ mod tests {
                     _ => unreachable!(),
                 }
             } else {
-                let start = i64::from(op.ins() + op.len()) + shift_all;
+                let start = i64::from(op.ins() + op.len()) + shift_deletes;
                 let start_pos: InsertPos = start.try_into().expect("delete start overflow");
                 let len = -op.len();
                 OpList::apply_delete(&mut baseline.ops, start_pos, len);
@@ -1705,8 +1662,15 @@ mod tests {
         ];
 
         for (current, prior) in cases {
-            let expected = backwards_apply_reference(&current, &prior);
-            assert_eq!(current.backwards_apply(&prior), expected);
+            let current_seq = current.from_oplist_to_sequential_list();
+            let prior_seq = prior.from_oplist_to_sequential_list();
+            let result = current_seq.backwards_apply(&prior_seq);
+            let reference = backwards_apply_reference(&current_seq, &prior_seq);
+            assert_eq!(
+                result, reference,
+                "Reference implementation diverged for current {:?} prior {:?}",
+                current_seq.ops, prior_seq.ops
+            );
         }
     }
 
