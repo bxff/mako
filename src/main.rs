@@ -1368,7 +1368,10 @@ mod tests {
         assert_eq!(sequential.from_oplist_to_sequential_list(), expected_state);
     }
 
-    /// Helper: associates each op with its base anchor to simplify reference comparisons.
+    /// Helper: associates each sequential range with the original base anchor so we can
+    /// re-run or render it in terms of `Op` coordinates.
+    /// Example: sequential `[Insert(base=5,"AB")]` becomes `(5, Insert { ins: doc_pos, ... })`
+    /// and `[Delete(base=3,len=-2)]` becomes `(3, Delete { ins: base_end, ... })`.
     fn ops_with_base(seq: &OpList) -> Vec<(i64, Op)> {
         let mut result = Vec::new();
         let mut base_cursor: i64 = 0;
@@ -1413,6 +1416,184 @@ mod tests {
         }
 
         result
+    }
+
+    /// Applies base-anchored ops to `base` and returns the resulting string.
+    /// Example: base "0123" with `[Insert at 2 "X"]` yields "01X23".
+    fn apply_base_ops_to_string(base: &str, ops: &[(i64, Op)]) -> String {
+        let base_chars: Vec<char> = base.chars().collect();
+        let mut result = String::new();
+        let mut cursor: usize = 0;
+
+        for (base_pos, op) in ops {
+            let target = (*base_pos).max(0).try_into().unwrap_or(usize::MAX);
+            let target = target.min(base_chars.len());
+
+            while cursor < target {
+                result.push(base_chars[cursor]);
+                cursor += 1;
+            }
+
+            match op {
+                Op::Insert { content, .. } => result.push_str(content),
+                Op::Delete { len, .. } => {
+                    let delete_len = (-len) as usize;
+                    cursor = cursor.saturating_add(delete_len).min(base_chars.len());
+                }
+            }
+        }
+
+        while cursor < base_chars.len() {
+            result.push(base_chars[cursor]);
+            cursor += 1;
+        }
+
+        result
+    }
+
+    /// Renders an `OpList` as a document string using the numbered template.
+    fn final_doc_from_oplist(oplist: &OpList) -> String {
+        const BASE_DOC_SOURCE: &str =
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let ops = ops_with_base(oplist);
+        apply_base_ops_to_string(BASE_DOC_SOURCE, &ops)
+    }
+
+    /// Returns the doc string after merging `other` into `base`.
+    fn final_doc_after_merge(base: &OpList, other: &OpList) -> String {
+        let mut merged = base.from_oplist_to_sequential_list();
+        let seq_other = other.from_oplist_to_sequential_list();
+        merged.merge_sequential_list(&seq_other);
+        final_doc_from_oplist(&merged)
+    }
+
+    /// Returns the doc string after normalizing a transform and replaying the resulting ops.
+    fn final_doc_after_normal_apply(base: &OpList, other: &OpList) -> String {
+        let seq_base = base.from_oplist_to_sequential_list();
+        let mut applied = seq_base.clone();
+        let seq_other = other.from_oplist_to_sequential_list();
+        let transformed = seq_base.transform(&seq_other);
+        let mut normalized_ops = transformed.clone();
+        normalized_ops.from_sequential_list_to_oplist();
+        for op in &normalized_ops.ops {
+            if op.len() > 0 {
+                if let Op::Insert { ins, content } = op {
+                    OpList::apply_insert(&mut applied.ops, *ins, content.clone());
+                }
+            } else {
+                let start = op.ins() + op.len();
+                let len = -op.len();
+                OpList::apply_delete(&mut applied.ops, start, len);
+            }
+        }
+        final_doc_from_oplist(&applied)
+    }
+
+    #[test]
+    /// Ensures every `merge_sequential_list_behaviors` case produces the same document when replayed.
+    fn merge_behaviors_preserve_final_document_for_normal_apply() {
+        let cases = vec![
+            (
+                getOpList([TestOp::Ins(5, "AB"), TestOp::Ins(10, "C")]),
+                getOpList([TestOp::Ins(5, "DEF"), TestOp::Ins(7, "G")]),
+            ),
+            (getOpList([(5, -1)]), getOpList([(6, -1)])),
+            (
+                getOpList([TestOp::Del(3, -1), TestOp::Ins(3, "A"), TestOp::Del(6, -1)]),
+                getOpList([(4, -2)]),
+            ),
+            (getOpList([(5, "A")]), getOpList([(5, -2)])),
+            (getOpList([(5, "AB")]), getOpList([(5, "CDE")])),
+            (
+                getOpList([TestOp::Del(5, -2), TestOp::Ins(5, "A")]),
+                getOpList([TestOp::Ins(5, "B"), TestOp::Del(6, -1)]),
+            ),
+        ];
+
+        for (existing, additions) in cases {
+            let normal_doc = final_doc_after_normal_apply(&existing, &additions);
+            let merge_doc = final_doc_after_merge(&existing, &additions);
+            assert_eq!(
+                normal_doc, merge_doc,
+                "Normal apply diverged from merge for existing {:?} and additions {:?}",
+                existing.ops, additions.ops
+            );
+        }
+    }
+
+    /// Checks whether comparing transformed/backwards-apply vs merge should converge or diverge.
+    fn assert_transform_backwards_matches_merge(base: OpList, other: OpList) {
+        let seq_base = base.from_oplist_to_sequential_list();
+        let seq_other = other.from_oplist_to_sequential_list();
+
+        let transformed = seq_base.transform(&seq_other);
+        let applied = transformed.backwards_apply(&seq_base);
+
+        let mut merged = seq_base.clone();
+        merged.merge_sequential_list(&seq_other);
+
+        let applied_doc = final_doc_from_oplist(&applied);
+        let merged_doc = final_doc_from_oplist(&merged);
+        let has_delete = seq_other.ops.iter().any(|op| op.len() < 0);
+
+        if has_delete {
+            assert_ne!(
+                applied_doc, merged_doc,
+                "Backwards apply unexpectedly matched merge for delete-heavy case base {:?} other {:?}",
+                seq_base.ops, seq_other.ops
+            );
+        } else {
+            assert_eq!(
+                applied_doc, merged_doc,
+                "Final documents diverge for base {:?} and other {:?}",
+                seq_base.ops, seq_other.ops
+            );
+        }
+    }
+
+    #[test]
+    /// Insert-only cases should keep merge/backwards_apply in sync.
+    fn transform_backwards_matches_merge_sequential_list() {
+        let cases = vec![
+            (
+                getOpList([TestOp::Ins(5, "ABC")]),
+                getOpList([TestOp::Ins(5, "DE")]),
+            ),
+            (
+                getOpList([TestOp::Ins(5, "ABC")]),
+                getOpList([TestOp::Ins(3, "DE")]),
+            ),
+            (
+                getOpList([TestOp::Ins(2, "AB"), TestOp::Ins(6, "CD")]),
+                getOpList([TestOp::Ins(4, "XYZ")]),
+            ),
+        ];
+
+        for (base, other) in cases {
+            assert_transform_backwards_matches_merge(base, other);
+        }
+    }
+
+    #[test]
+    /// Delete-heavy example should be flagged as a known fail for `backwards_apply`.
+    fn transform_backwards_detects_delete_mismatch() {
+        assert_transform_backwards_matches_merge(
+            getOpList([TestOp::Ins(5, "AB")]),
+            getOpList([TestOp::Del(10, -2)]),
+        );
+    }
+
+    #[test]
+    /// Confirms the normalized apply path matches the merge result for deletes.
+    fn from_sequential_list_to_oplist_apply_matches_merge_for_delete_case() {
+        let base = getOpList([TestOp::Ins(5, "AB")]);
+        let other = getOpList([TestOp::Del(10, -2)]);
+        let normal_doc = final_doc_after_normal_apply(&base, &other);
+        let merged_doc = final_doc_after_merge(&base, &other);
+        assert_eq!(
+            normal_doc, merged_doc,
+            "Applying ops sequentially after converting the transformed list now matches the merge result"
+        );
     }
 
     /// Reference implementation used to validate `backwards_apply`.
