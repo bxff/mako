@@ -10,6 +10,31 @@ struct TransformOp {
     len: Length,
 }
 
+trait TransformSpan {
+    fn span_ins(&self) -> InsertPos;
+    fn span_len(&self) -> Length;
+}
+
+impl TransformSpan for Op {
+    fn span_ins(&self) -> InsertPos {
+        self.ins()
+    }
+
+    fn span_len(&self) -> Length {
+        self.len()
+    }
+}
+
+impl TransformSpan for TransformOp {
+    fn span_ins(&self) -> InsertPos {
+        self.ins
+    }
+
+    fn span_len(&self) -> Length {
+        self.len
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Insert { ins: InsertPos, content: String },
@@ -850,19 +875,22 @@ impl OpList {
     /// `self` is the base transformation. `other` is the operation to transform.
     /// Returns a simplified transformation containing only positions and lengths.
     fn transform(&self, other: &OpList) -> Vec<TransformOp> {
-        self.transform_spans_impl(other, true)
+        Self::transform_spans_impl(&self.ops, other, true)
     }
 
     /// Applies a transformation on the sequential list.
     /// `transformer` is the operation to apply on `self`.
-    fn apply_transformation(&mut self, transformer: &OpList) {
-        let new_ops = transformer.transform_ops_impl(self, false);
+    fn apply_transformation(&mut self, transformer: &[TransformOp]) {
+        let new_ops = Self::transform_ops_impl(transformer, self, false);
         self.ops = new_ops.ops;
     }
 
-    fn transform_ops_impl(&self, other: &OpList, shift_on_tie: bool) -> OpList {
+    fn transform_ops_impl<BaseSpan: TransformSpan>(
+        base: &[BaseSpan],
+        other: &OpList,
+        shift_on_tie: bool,
+    ) -> OpList {
         let mut res_ops = Vec::new();
-        let s_ops = &self.ops;
         let mut s_i = 0;
         let mut cumulative_shift: i64 = 0;
 
@@ -870,28 +898,28 @@ impl OpList {
             let target = op.ins() as i64;
 
             // Advance s_i to target
-            while s_i < s_ops.len() {
-                let sop = &s_ops[s_i];
-                let sop_ins = sop.ins() as i64;
+            while s_i < base.len() {
+                let sop = &base[s_i];
+                let sop_ins = sop.span_ins() as i64;
                 if sop_ins > target {
                     break;
                 }
 
-                if sop.len() < 0 {
-                    let sop_end = sop_ins - sop.len() as i64;
+                if sop.span_len() < 0 {
+                    let sop_end = sop_ins - sop.span_len() as i64;
                     if sop_end > target {
                         // Overlaps target. Don't consume.
                         break;
                     }
                     // Fully before target
-                    cumulative_shift += sop.len() as i64;
+                    cumulative_shift += sop.span_len() as i64;
                     s_i += 1;
                 } else {
                     // Insert
                     if sop_ins == target && !shift_on_tie {
                         break;
                     }
-                    cumulative_shift += sop.len() as i64;
+                    cumulative_shift += sop.span_len() as i64;
                     s_i += 1;
                 }
             }
@@ -900,21 +928,21 @@ impl OpList {
                 let mut mapped_pos = target + cumulative_shift;
                 let mut temp_s_i = s_i;
 
-                while temp_s_i < s_ops.len() {
-                    let sop = &s_ops[temp_s_i];
-                    let sop_ins = sop.ins() as i64;
+                while temp_s_i < base.len() {
+                    let sop = &base[temp_s_i];
+                    let sop_ins = sop.span_ins() as i64;
                     if sop_ins > target {
                         break;
                     }
 
-                    if sop.len() > 0 {
+                    if sop.span_len() > 0 {
                         if sop_ins == target && !shift_on_tie {
                             // Don't shift for inserts at target if !shift_on_tie
                         } else {
-                            mapped_pos += sop.len() as i64;
+                            mapped_pos += sop.span_len() as i64;
                         }
                     } else {
-                        let sop_end = sop_ins - sop.len() as i64;
+                        let sop_end = sop_ins - sop.span_len() as i64;
                         if sop_ins <= target && target < sop_end {
                             mapped_pos -= target - sop_ins;
                         }
@@ -943,11 +971,11 @@ impl OpList {
                 let mut temp_shift = cumulative_shift;
 
                 // Check if we are inside a delete initially
-                if temp_s_i < s_ops.len() {
-                    let sop = &s_ops[temp_s_i];
-                    let sop_ins = sop.ins() as i64;
-                    if sop_ins <= curr && sop.len() < 0 {
-                        let sop_end = sop_ins - sop.len() as i64;
+                if temp_s_i < base.len() {
+                    let sop = &base[temp_s_i];
+                    let sop_ins = sop.span_ins() as i64;
+                    if sop_ins <= curr && sop.span_len() < 0 {
+                        let sop_end = sop_ins - sop.span_len() as i64;
                         let overlap = sop_end.min(del_end) - curr;
                         curr += overlap;
                         temp_shift -= overlap;
@@ -958,7 +986,7 @@ impl OpList {
                 }
 
                 while curr < del_end {
-                    if temp_s_i >= s_ops.len() {
+                    if temp_s_i >= base.len() {
                         let len = del_end - curr;
                         let ins: InsertPos = (curr + temp_shift)
                             .try_into()
@@ -969,8 +997,8 @@ impl OpList {
                         break;
                     }
 
-                    let sop = &s_ops[temp_s_i];
-                    let sop_ins = sop.ins() as i64;
+                    let sop = &base[temp_s_i];
+                    let sop_ins = sop.span_ins() as i64;
 
                     if sop_ins >= del_end {
                         let len = del_end - curr;
@@ -996,13 +1024,13 @@ impl OpList {
                     }
 
                     // Now curr == sop_ins
-                    if sop.len() > 0 {
+                    if sop.span_len() > 0 {
                         if shift_on_tie {
-                            temp_shift += sop.len() as i64;
+                            temp_shift += sop.span_len() as i64;
                         }
                         temp_s_i += 1;
                     } else {
-                        let sop_end = sop_ins - sop.len() as i64;
+                        let sop_end = sop_ins - sop.span_len() as i64;
                         let overlap = sop_end.min(del_end) - curr;
                         curr += overlap;
                         temp_shift -= overlap;
@@ -1022,8 +1050,12 @@ impl OpList {
         }
     }
 
-    fn transform_spans_impl(&self, other: &OpList, shift_on_tie: bool) -> Vec<TransformOp> {
-        self.transform_ops_impl(other, shift_on_tie)
+    fn transform_spans_impl<BaseSpan: TransformSpan>(
+        base: &[BaseSpan],
+        other: &OpList,
+        shift_on_tie: bool,
+    ) -> Vec<TransformOp> {
+        Self::transform_ops_impl(base, other, shift_on_tie)
             .ops
             .into_iter()
             .map(|op| match op {
@@ -1336,17 +1368,16 @@ mod tests {
     #[test]
     fn apply_transformation_behaviors() {
         let mut s = getOpList([(5, "ABC")]);
-        let t = getOpList([(5, "XY")]);
+        let t = vec![TransformOp { ins: 5, len: 2 }];
         s.apply_transformation(&t);
-        // (5, 2) applied on (5, 3) -> (5, 3) because t inserts at 5, s inserts at 5.
-        // s is transformed against t.
-        // t.transform(s) with shift_on_tie=false.
-        // s at 5. t at 5. t inserts 2. s is NOT shifted.
+        // (5, 2) applied on (5, 3) -> (5, 3) because transformer inserts at 5, s inserts at 5.
+        // s is transformed against the transformation spans with shift_on_tie=false.
+        // s at 5. transformer at 5. transformer inserts 2. s is NOT shifted.
         // So s remains at 5.
         assert_eq!(s, getOpList([(5, "ABC")]));
 
         let mut s = getOpList([TestOp::Ins(5, "ABC"), TestOp::Ins(6, "D")]);
-        let t = getOpList([(5, "XY")]);
+        let t = vec![TransformOp { ins: 5, len: 2 }];
         s.apply_transformation(&t);
         // s has (5, 3) and (6, 1).
         // (5, 3) -> (5, 3) (as above)
@@ -1367,7 +1398,7 @@ mod tests {
         // Wait, if 5 and 6 are deleted, the index 5 still exists (it's the start of the deletion).
         // So S should still be (5, 3).
         let mut s = getOpList([(5, "ABC")]);
-        let t = getOpList([(5, -2)]);
+        let t = vec![TransformOp { ins: 5, len: -2 }];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList([(5, "ABC")]));
 
@@ -1382,7 +1413,7 @@ mod tests {
         // S inserts at 5 of the BASE document.
         // So S is unaffected by T's insert at 7.
         let mut s = getOpList([(5, "ABCD")]);
-        let t = getOpList([(7, "XY")]);
+        let t = vec![TransformOp { ins: 7, len: 2 }];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList([(5, "ABCD")]));
 
@@ -1400,7 +1431,7 @@ mod tests {
         // 5 is before 6. So 5 is still at 5.
         // Result: S should become (5, -1).
         let mut s = getOpList([(5, -3)]);
-        let t = getOpList([(6, -3)]);
+        let t = vec![TransformOp { ins: 6, len: -3 }];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList([(5, -1)]));
 
@@ -1431,7 +1462,7 @@ mod tests {
         // So S should delete range [5, 8) in New? i.e. 5, 6, 7.
         // So S becomes (5, -3).
         let mut s = getOpList([(5, -5)]);
-        let t = getOpList([(6, -2)]);
+        let t = vec![TransformOp { ins: 6, len: -2 }];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList([(5, -3)]));
 
@@ -1441,7 +1472,7 @@ mod tests {
         // T deletes everything S wanted to delete.
         // S should become empty.
         let mut s = getOpList([(6, -2)]);
-        let t = getOpList([(5, -5)]);
+        let t = vec![TransformOp { ins: 5, len: -5 }];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList::<(InsertPos, Length), 0>([]));
 
@@ -1530,7 +1561,10 @@ mod tests {
         // So expected: [(4, 2), (6, -2)].
 
         let mut s = getOpList([TestOp::Ins(5, "AB"), TestOp::Del(8, -2)]);
-        let t = getOpList([TestOp::Del(4, -2), TestOp::Ins(8, "X")]);
+        let t = vec![
+            TransformOp { ins: 4, len: -2 },
+            TransformOp { ins: 8, len: 1 },
+        ];
         s.apply_transformation(&t);
         assert_eq!(s, getOpList([TestOp::Ins(4, "AB"), TestOp::Del(6, -2)]));
     }
