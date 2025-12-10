@@ -10,6 +10,46 @@ struct TransformOp {
     len: Length,
 }
 
+trait TransformSink {
+    fn push_insert(&mut self, ins: InsertPos, content: &str);
+    fn push_delete(&mut self, ins: InsertPos, len: Length);
+}
+
+struct OpSink<'a> {
+    ops: &'a mut Vec<Op>,
+}
+
+struct SpanSink<'a> {
+    spans: &'a mut Vec<TransformOp>,
+}
+
+impl<'a> TransformSink for OpSink<'a> {
+    fn push_insert(&mut self, ins: InsertPos, content: &str) {
+        OpList::push_op(
+            self.ops,
+            Op::Insert {
+                ins,
+                content: content.to_string(),
+            },
+        );
+    }
+
+    fn push_delete(&mut self, ins: InsertPos, len: Length) {
+        OpList::push_op(self.ops, Op::Delete { ins, len });
+    }
+}
+
+impl<'a> TransformSink for SpanSink<'a> {
+    fn push_insert(&mut self, ins: InsertPos, content: &str) {
+        let len = content.len() as Length;
+        OpList::push_transform_span(self.spans, TransformOp { ins, len });
+    }
+
+    fn push_delete(&mut self, ins: InsertPos, len: Length) {
+        OpList::push_transform_span(self.spans, TransformOp { ins, len });
+    }
+}
+
 trait TransformSpan {
     fn span_ins(&self) -> InsertPos;
     fn span_len(&self) -> Length;
@@ -871,11 +911,31 @@ impl OpList {
         Op::Delete { ins, len: -len }
     }
 
+    fn push_transform_span(spans: &mut Vec<TransformOp>, span: TransformOp) {
+        if span.len == 0 {
+            return;
+        }
+        if let Some(last) = spans.last_mut() {
+            if span.len > 0 && last.len > 0 && last.ins == span.ins {
+                last.len += span.len;
+                return;
+            }
+            if span.len < 0 && last.len < 0 {
+                let last_end = last.ins as i64 - last.len as i64;
+                if last_end == span.ins as i64 {
+                    last.len += span.len;
+                    return;
+                }
+            }
+        }
+        spans.push(span);
+    }
+
     /// Transforms another sequential list against `self`.
     /// `self` is the base transformation. `other` is the operation to transform.
     /// Returns a simplified transformation containing only positions and lengths.
     fn transform(&self, other: &OpList) -> Vec<TransformOp> {
-        Self::transform_spans_impl(&self.ops, other, true)
+        Self::transform_to_spans(&self.ops, other, true)
     }
 
     /// Applies a transformation on the sequential list.
@@ -891,13 +951,41 @@ impl OpList {
         shift_on_tie: bool,
     ) -> OpList {
         let mut res_ops = Vec::new();
+        {
+            let mut sink = OpSink { ops: &mut res_ops };
+            Self::transform_generic(base, other, shift_on_tie, &mut sink);
+        }
+        OpList {
+            ops: res_ops,
+            test_op: None,
+        }
+    }
+
+    fn transform_to_spans<BaseSpan: TransformSpan>(
+        base: &[BaseSpan],
+        other: &OpList,
+        shift_on_tie: bool,
+    ) -> Vec<TransformOp> {
+        let mut spans = Vec::new();
+        {
+            let mut sink = SpanSink { spans: &mut spans };
+            Self::transform_generic(base, other, shift_on_tie, &mut sink);
+        }
+        spans
+    }
+
+    fn transform_generic<BaseSpan: TransformSpan, Sink: TransformSink>(
+        base: &[BaseSpan],
+        other: &OpList,
+        shift_on_tie: bool,
+        sink: &mut Sink,
+    ) {
         let mut s_i = 0;
         let mut cumulative_shift: i64 = 0;
 
         for op in &other.ops {
             let target = op.ins() as i64;
 
-            // Advance s_i to target
             while s_i < base.len() {
                 let sop = &base[s_i];
                 let sop_ins = sop.span_ins() as i64;
@@ -908,14 +996,11 @@ impl OpList {
                 if sop.span_len() < 0 {
                     let sop_end = sop_ins - sop.span_len() as i64;
                     if sop_end > target {
-                        // Overlaps target. Don't consume.
                         break;
                     }
-                    // Fully before target
                     cumulative_shift += sop.span_len() as i64;
                     s_i += 1;
                 } else {
-                    // Insert
                     if sop_ins == target && !shift_on_tie {
                         break;
                     }
@@ -937,7 +1022,6 @@ impl OpList {
 
                     if sop.span_len() > 0 {
                         if sop_ins == target && !shift_on_tie {
-                            // Don't shift for inserts at target if !shift_on_tie
                         } else {
                             mapped_pos += sop.span_len() as i64;
                         }
@@ -951,17 +1035,8 @@ impl OpList {
                 }
 
                 let ins: InsertPos = mapped_pos.try_into().expect("transform insert overflow");
-                match op {
-                    Op::Insert { content, .. } => {
-                        Self::push_op(
-                            &mut res_ops,
-                            Op::Insert {
-                                ins,
-                                content: content.clone(),
-                            },
-                        );
-                    }
-                    _ => unreachable!(),
+                if let Op::Insert { content, .. } = op {
+                    sink.push_insert(ins, content);
                 }
             } else {
                 let del_len = -op.len() as i64;
@@ -970,7 +1045,6 @@ impl OpList {
                 let mut temp_s_i = s_i;
                 let mut temp_shift = cumulative_shift;
 
-                // Check if we are inside a delete initially
                 if temp_s_i < base.len() {
                     let sop = &base[temp_s_i];
                     let sop_ins = sop.span_ins() as i64;
@@ -993,7 +1067,7 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
+                        sink.push_delete(ins, -len_i32);
                         break;
                     }
 
@@ -1007,11 +1081,10 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
+                        sink.push_delete(ins, -len_i32);
                         break;
                     }
 
-                    // sop.ins is in [curr, del_end)
                     if sop_ins > curr {
                         let len = sop_ins - curr;
                         let ins: InsertPos = (curr + temp_shift)
@@ -1019,11 +1092,10 @@ impl OpList {
                             .expect("transform delete overflow");
                         let len_i32: Length =
                             len.try_into().expect("transform delete len overflow");
-                        Self::push_op(&mut res_ops, Op::Delete { ins, len: -len_i32 });
+                        sink.push_delete(ins, -len_i32);
                         curr = sop_ins;
                     }
 
-                    // Now curr == sop_ins
                     if sop.span_len() > 0 {
                         if shift_on_tie {
                             temp_shift += sop.span_len() as i64;
@@ -1043,29 +1115,6 @@ impl OpList {
                 }
             }
         }
-
-        OpList {
-            ops: res_ops,
-            test_op: None,
-        }
-    }
-
-    fn transform_spans_impl<BaseSpan: TransformSpan>(
-        base: &[BaseSpan],
-        other: &OpList,
-        shift_on_tie: bool,
-    ) -> Vec<TransformOp> {
-        Self::transform_ops_impl(base, other, shift_on_tie)
-            .ops
-            .into_iter()
-            .map(|op| match op {
-                Op::Insert { ins, content } => TransformOp {
-                    ins,
-                    len: content.len() as Length,
-                },
-                Op::Delete { ins, len } => TransformOp { ins, len },
-            })
-            .collect()
     }
 
     fn push_op(ops: &mut Vec<Op>, op: Op) {
