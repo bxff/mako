@@ -5,6 +5,12 @@ type InsertPos = i32;
 type Length = i32;
 
 #[derive(Clone, Debug, PartialEq)]
+struct TransformOp {
+    ins: InsertPos,
+    len: Length,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Insert { ins: InsertPos, content: String },
     Delete { ins: InsertPos, len: Length },
@@ -355,6 +361,108 @@ impl OpList {
                 Self::merge_delete(&mut self.ops, op.clone());
             }
         }
+    }
+
+    fn merge_transformations(a: &[TransformOp], b: &[TransformOp]) -> Vec<TransformOp> {
+        let mut result = Vec::new();
+        let mut pending_insert: Option<TransformOp> = None;
+        let mut pending_delete: Option<(i64, i64)> = None;
+        let mut a_idx = 0;
+        let mut b_idx = 0;
+
+        while a_idx < a.len() || b_idx < b.len() {
+            let next = match (a.get(a_idx), b.get(b_idx)) {
+                (Some(a_op), Some(b_op)) => {
+                    if a_op.ins <= b_op.ins {
+                        a_idx += 1;
+                        a_op.clone()
+                    } else {
+                        b_idx += 1;
+                        b_op.clone()
+                    }
+                }
+                (Some(a_op), None) => {
+                    a_idx += 1;
+                    a_op.clone()
+                }
+                (None, Some(b_op)) => {
+                    b_idx += 1;
+                    b_op.clone()
+                }
+                (None, None) => break,
+            };
+
+            if next.len > 0 {
+                if let Some(range) = pending_delete.take() {
+                    Self::flush_transform_delete_range(&mut result, range);
+                }
+                Self::accumulate_insert(&mut result, &mut pending_insert, next);
+            } else {
+                if let Some(insert) = pending_insert.take() {
+                    result.push(insert);
+                }
+                Self::accumulate_delete(&mut result, &mut pending_delete, next);
+            }
+        }
+
+        if let Some(range) = pending_delete {
+            Self::flush_transform_delete_range(&mut result, range);
+        }
+
+        if let Some(insert) = pending_insert {
+            result.push(insert);
+        }
+
+        result
+    }
+
+    fn accumulate_insert(
+        result: &mut Vec<TransformOp>,
+        pending: &mut Option<TransformOp>,
+        op: TransformOp,
+    ) {
+        if let Some(mut current) = pending.take() {
+            let current_end = i64::from(current.ins) + i64::from(current.len);
+            let op_ins = i64::from(op.ins);
+            if current.ins == op.ins || current_end == op_ins {
+                current.len += op.len;
+                *pending = Some(current);
+                return;
+            }
+            result.push(current);
+        }
+        *pending = Some(op);
+    }
+
+    fn accumulate_delete(
+        result: &mut Vec<TransformOp>,
+        pending: &mut Option<(i64, i64)>,
+        op: TransformOp,
+    ) {
+        let start = i64::from(op.ins + op.len);
+        let end = i64::from(op.ins);
+
+        if let Some((curr_start, curr_end)) = pending.take() {
+            if start <= curr_end {
+                let merged_start = curr_start.min(start);
+                let merged_end = curr_end.max(end);
+                *pending = Some((merged_start, merged_end));
+                return;
+            }
+            Self::flush_transform_delete_range(result, (curr_start, curr_end));
+        }
+        *pending = Some((start, end));
+    }
+
+    fn flush_transform_delete_range(result: &mut Vec<TransformOp>, range: (i64, i64)) {
+        let (start, end) = range;
+        if end <= start {
+            return;
+        }
+        let ins: InsertPos = end.try_into().expect("delete base overflow");
+        let len_i64 = end - start;
+        let len: Length = len_i64.try_into().expect("delete len overflow");
+        result.push(TransformOp { ins, len: -len });
     }
 
     /// Merges a positive-length operation into an ordered list, combining adjacent inserts at the same base.
@@ -740,19 +848,19 @@ impl OpList {
 
     /// Transforms another sequential list against `self`.
     /// `self` is the base transformation. `other` is the operation to transform.
-    /// Returns a new `OpList` representing `other` applied after `self`.
-    fn transform(&self, other: &OpList) -> OpList {
-        self.transform_impl(other, true)
+    /// Returns a simplified transformation containing only positions and lengths.
+    fn transform(&self, other: &OpList) -> Vec<TransformOp> {
+        self.transform_spans_impl(other, true)
     }
 
     /// Applies a transformation on the sequential list.
     /// `transformer` is the operation to apply on `self`.
     fn apply_transformation(&mut self, transformer: &OpList) {
-        let new_ops = transformer.transform_impl(self, false);
+        let new_ops = transformer.transform_ops_impl(self, false);
         self.ops = new_ops.ops;
     }
 
-    fn transform_impl(&self, other: &OpList, shift_on_tie: bool) -> OpList {
+    fn transform_ops_impl(&self, other: &OpList, shift_on_tie: bool) -> OpList {
         let mut res_ops = Vec::new();
         let s_ops = &self.ops;
         let mut s_i = 0;
@@ -912,6 +1020,20 @@ impl OpList {
             ops: res_ops,
             test_op: None,
         }
+    }
+
+    fn transform_spans_impl(&self, other: &OpList, shift_on_tie: bool) -> Vec<TransformOp> {
+        self.transform_ops_impl(other, shift_on_tie)
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                Op::Insert { ins, content } => TransformOp {
+                    ins,
+                    len: content.len() as Length,
+                },
+                Op::Delete { ins, len } => TransformOp { ins, len },
+            })
+            .collect()
     }
 
     fn push_op(ops: &mut Vec<Op>, op: Op) {
@@ -1091,41 +1213,124 @@ mod tests {
     }
 
     #[test]
+    fn merge_transformations_combines_deletes_commutatively() {
+        let t1 = vec![TransformOp { ins: 2, len: -1 }];
+        let t2 = vec![TransformOp { ins: 3, len: -1 }];
+        let t3 = vec![TransformOp { ins: 4, len: -1 }];
+
+        let merged_first = OpList::merge_transformations(
+            &OpList::merge_transformations(&t1, &t2),
+            &t3,
+        );
+        let merged_second = OpList::merge_transformations(
+            &OpList::merge_transformations(&t2, &t1),
+            &t3,
+        );
+        let merged_third = OpList::merge_transformations(
+            &OpList::merge_transformations(&t3, &t2),
+            &t1,
+        );
+
+        let expected = vec![TransformOp { ins: 4, len: -3 }];
+        assert_eq!(merged_first, expected);
+        assert_eq!(merged_second, expected);
+        assert_eq!(merged_third, expected);
+    }
+
+    #[test]
+    fn merge_transformations_combines_inserts_commutatively() {
+        let t1 = vec![TransformOp { ins: 1, len: 1 }];
+        let t2 = vec![TransformOp { ins: 2, len: 1 }];
+        let t3 = vec![TransformOp { ins: 3, len: 1 }];
+
+        let merged_first = OpList::merge_transformations(
+            &OpList::merge_transformations(&t1, &t2),
+            &t3,
+        );
+        let merged_second = OpList::merge_transformations(
+            &OpList::merge_transformations(&t3, &t2),
+            &t1,
+        );
+        let merged_third = OpList::merge_transformations(
+            &OpList::merge_transformations(&t2, &t3),
+            &t1,
+        );
+
+        let expected = vec![TransformOp { ins: 1, len: 3 }];
+        assert_eq!(merged_first, expected);
+        assert_eq!(merged_second, expected);
+        assert_eq!(merged_third, expected);
+    }
+
+    #[test]
+    fn merge_transformations_overlapping_deletes_merge_into_one_span() {
+        let a = vec![TransformOp { ins: 7, len: -3 }];
+        let b = vec![TransformOp { ins: 5, len: -2 }];
+
+        let merged = OpList::merge_transformations(&a, &b);
+        assert_eq!(merged, vec![TransformOp { ins: 7, len: -4 }]);
+    }
+
+    #[test]
+    fn merge_transformations_contiguous_inserts_coalesce() {
+        let a = vec![TransformOp { ins: 5, len: 2 }];
+        let b = vec![TransformOp { ins: 7, len: 3 }];
+
+        let merged = OpList::merge_transformations(&a, &b);
+        assert_eq!(merged, vec![TransformOp { ins: 5, len: 5 }]);
+    }
+
+    #[test]
+    fn merge_transformations_insert_and_delete_preserve_order() {
+        let insert = vec![TransformOp { ins: 2, len: 3 }];
+        let delete = vec![TransformOp { ins: 6, len: -2 }];
+
+        let merged = OpList::merge_transformations(&insert, &delete);
+        assert_eq!(
+            merged,
+            vec![
+                TransformOp { ins: 2, len: 3 },
+                TransformOp { ins: 6, len: -2 }
+            ]
+        );
+    }
+
+    #[test]
     fn transform_behaviors() {
         let s = getOpList([TestOp::Ins(5, "AB")]);
         let o = getOpList([TestOp::Ins(5, "CDE")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Ins(7, "CDE")]));
+        assert_eq!(res, vec![TransformOp { ins: 7, len: 3 }]);
 
         let s = getOpList([TestOp::Del(5, -2), TestOp::Ins(6, "G")]);
         let o = getOpList([TestOp::Ins(6, "F")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Ins(6, "F")]));
+        assert_eq!(res, vec![TransformOp { ins: 6, len: 1 }]);
 
         let s = getOpList([TestOp::Ins(5, "ABC")]);
         let o = getOpList([TestOp::Ins(5, "DE")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Ins(8, "DE")]));
+        assert_eq!(res, vec![TransformOp { ins: 8, len: 2 }]);
 
         let s = getOpList([TestOp::Del(5, -2)]);
         let o = getOpList([TestOp::Ins(6, "F")]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Ins(5, "F")]));
+        assert_eq!(res, vec![TransformOp { ins: 5, len: 1 }]);
 
         let s = getOpList([TestOp::Del(5, -5)]);
         let o = getOpList([TestOp::Del(3, -10)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Del(3, -5)]));
+        assert_eq!(res, vec![TransformOp { ins: 3, len: -5 }]);
 
         let s = getOpList([TestOp::Ins(5, "AB")]);
         let o = getOpList([TestOp::Del(5, -2)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList([TestOp::Del(7, -2)]));
+        assert_eq!(res, vec![TransformOp { ins: 7, len: -2 }]);
 
         let s = getOpList([TestOp::Del(5, -2)]);
         let o = getOpList([TestOp::Del(5, -2)]);
         let res = s.transform(&o);
-        assert_eq!(res, getOpList::<(InsertPos, Length), 0>([]));
+        assert!(res.is_empty());
     }
 
     #[test]
