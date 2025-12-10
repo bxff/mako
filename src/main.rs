@@ -1299,18 +1299,12 @@ mod tests {
         let t2 = vec![TransformOp { ins: 3, len: -1 }];
         let t3 = vec![TransformOp { ins: 4, len: -1 }];
 
-        let merged_first = OpList::merge_transformations(
-            &OpList::merge_transformations(&t1, &t2),
-            &t3,
-        );
-        let merged_second = OpList::merge_transformations(
-            &OpList::merge_transformations(&t2, &t1),
-            &t3,
-        );
-        let merged_third = OpList::merge_transformations(
-            &OpList::merge_transformations(&t3, &t2),
-            &t1,
-        );
+        let merged_first =
+            OpList::merge_transformations(&OpList::merge_transformations(&t1, &t2), &t3);
+        let merged_second =
+            OpList::merge_transformations(&OpList::merge_transformations(&t2, &t1), &t3);
+        let merged_third =
+            OpList::merge_transformations(&OpList::merge_transformations(&t3, &t2), &t1);
 
         let expected = vec![TransformOp { ins: 4, len: -3 }];
         assert_eq!(merged_first, expected);
@@ -1324,18 +1318,12 @@ mod tests {
         let t2 = vec![TransformOp { ins: 2, len: 1 }];
         let t3 = vec![TransformOp { ins: 3, len: 1 }];
 
-        let merged_first = OpList::merge_transformations(
-            &OpList::merge_transformations(&t1, &t2),
-            &t3,
-        );
-        let merged_second = OpList::merge_transformations(
-            &OpList::merge_transformations(&t3, &t2),
-            &t1,
-        );
-        let merged_third = OpList::merge_transformations(
-            &OpList::merge_transformations(&t2, &t3),
-            &t1,
-        );
+        let merged_first =
+            OpList::merge_transformations(&OpList::merge_transformations(&t1, &t2), &t3);
+        let merged_second =
+            OpList::merge_transformations(&OpList::merge_transformations(&t3, &t2), &t1);
+        let merged_third =
+            OpList::merge_transformations(&OpList::merge_transformations(&t2, &t3), &t1);
 
         let expected = vec![TransformOp { ins: 1, len: 3 }];
         assert_eq!(merged_first, expected);
@@ -2207,14 +2195,14 @@ mod tests {
         let mut visited = std::collections::HashSet::new();
         // walk(1): Visits 1, then 3, then 4.
         // Result: BDE.
-        let res1 = graph.walk(1, &mut visited);
+        let res1 = graph.walk(1, &mut visited, None);
         assert_eq!(oplist_to_string(&res1), "BDE");
 
         // walk(2): Visits 2.
         // Children 3 and 4 are ALREADY IN VISITED from walk(1).
         // So they return empty.
         // Result: C + empty = C.
-        let res2 = graph.walk(2, &mut visited);
+        let res2 = graph.walk(2, &mut visited, None);
         assert_eq!(oplist_to_string(&res2), "C");
 
         // Full Merge Logic (fresh start)
