@@ -2195,14 +2195,14 @@ mod tests {
         let mut visited = std::collections::HashSet::new();
         // walk(1): Visits 1, then 3, then 4.
         // Result: BDE.
-        let res1 = graph.walk(1, &mut visited, None);
+        let res1 = graph.walk(1, &mut visited);
         assert_eq!(oplist_to_string(&res1), "BDE");
 
         // walk(2): Visits 2.
         // Children 3 and 4 are ALREADY IN VISITED from walk(1).
         // So they return empty.
         // Result: C + empty = C.
-        let res2 = graph.walk(2, &mut visited, None);
+        let res2 = graph.walk(2, &mut visited);
         assert_eq!(oplist_to_string(&res2), "C");
 
         // Full Merge Logic (fresh start)
