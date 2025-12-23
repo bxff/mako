@@ -2121,6 +2121,48 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_graph_diamond_downward() {
+        // Graph structure:
+        //      1(A)
+        //     /   \
+        //   2(B)  6(F)
+        //   /  \
+        // 3(C) 4(D)
+        //   \  /
+        //   5(E)
+
+        let op1 = getOpList([(0, "A")]);
+        let mut graph = Graph::new(1, op1);
+
+        let op2 = getOpList([(1, "B")]);
+        graph.add_node(2, op2, vec![1]);
+
+        let op3 = getOpList([(2, "C")]);
+        graph.add_node(3, op3, vec![2]);
+
+        let op4 = getOpList([(2, "D")]);
+        graph.add_node(4, op4, vec![2]);
+
+        let op5 = getOpList([(3, "E")]);
+        graph.add_node(5, op5, vec![3, 4]);
+
+        let op6 = getOpList([(1, "F")]);
+        graph.add_node(6, op6, vec![1]);
+
+        let mut final_oplist = graph.merge_graph();
+        final_oplist.from_sequential_list_to_oplist();
+
+        // Expected Result:
+        // walk(2) visits 3, 4, 5 -> returns "BCED"
+        // walk(6) returns "F"
+        // Merging 6 into 2: "F" appends to "BCED" -> "BCEDF"
+        // Final result: "ABCEDF"
+        
+        let res = oplist_to_string(&final_oplist);
+        assert_eq!(res, "ABCEDF");
+    }
+
+    #[test]
     fn test_merge_shared_parents_siblings() {
         // Test merging multiple siblings to ensure deterministic order and memoization.
         // Root(A) -> 2(B), 3(C), 4(D)
